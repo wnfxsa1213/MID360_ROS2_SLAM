@@ -8,28 +8,51 @@
 
 ### 核心功能
 - ✅ **MID360雷达驱动集成** - 成功部署livox_ros_driver2
-- ✅ **FAST-LIO2 SLAM算法** - 集成liangheming/FASTLIO2_ROS2实现实时建图
+- ✅ **FAST-LIO2 SLAM算法** - 集成实时建图核心功能
+- ✅ **完整SLAM管道** - FastLIO2 + PGO + HBA + Localizer四组件集成
+- ✅ **位姿图优化(PGO)** - 基于GTSAM的回环检测和轨迹优化
+- ✅ **分层束调整(HBA)** - 高精度地图优化算法
+- ✅ **重定位系统(Localizer)** - 基于ICP的地图重定位功能
+- ✅ **地图保存系统** - 支持PCD/PLY格式的稠密点云地图保存
 - ✅ **网络配置优化** - 支持192.168.1.50(电脑) ↔ 192.168.1.3(雷达)通信
 - ✅ **实时可视化** - RViz2展示建图结果和机器人轨迹
-- ✅ **完整工具链** - 启动、监控、调试脚本集合
+- ✅ **完整工具链** - 启动、监控、调试、地图保存脚本集合
 
 ### 技术架构
 ```
-MID360雷达 → livox_ros_driver2 → FASTLIO2算法 → 建图输出
-    ↓              ↓                ↓           ↓
-UDP数据流     ROS2话题转换      SLAM处理     RViz可视化
+MID360雷达 → livox_ros_driver2 → FASTLIO2核心SLAM → 完整SLAM管道
+    ↓              ↓                   ↓              ↓
+UDP数据流    ROS2话题转换        实时建图        PGO+HBA优化
+                                      ↓              ↓
+                                RViz可视化     地图保存&重定位
 ```
+
+### 完整SLAM管道
+1. **FastLIO2** - 实时SLAM建图核心，提供基础里程计和点云地图
+2. **PGO** - 位姿图优化，通过回环检测减少累积误差
+3. **HBA** - 分层束调整，进行高精度地图优化
+4. **Localizer** - 重定位系统，支持基于已有地图的定位
 
 ### ROS2话题结构
 **输入话题:**
 - `/livox/lidar` - 点云数据 (sensor_msgs/PointCloud2)
 - `/livox/imu` - IMU数据 (sensor_msgs/Imu)
 
-**输出话题:**
+**核心输出话题:**
 - `/fastlio2/lio_odom` - SLAM里程计 (nav_msgs/Odometry)
 - `/fastlio2/lio_path` - 机器人轨迹 (nav_msgs/Path)
 - `/fastlio2/world_cloud` - 世界地图点云 (sensor_msgs/PointCloud2)
 - `/fastlio2/body_cloud` - 机身坐标系点云 (sensor_msgs/PointCloud2)
+
+**高级功能话题:**
+- `/pgo/optimized_path` - PGO优化后轨迹
+- `/hba/refined_map` - HBA优化后地图
+- `/localizer/pose` - 重定位结果
+
+**服务接口:**
+- `/fastlio2/save_maps` - 地图保存服务
+- `/fastlio2/save_poses` - 轨迹保存服务
+- `/localizer/relocalize` - 重定位服务
 
 ## 📁 项目结构
 
@@ -154,20 +177,93 @@ cube_len: 300          # 地图立方体大小
 3. **模块化架构** - 核心功能与扩展功能解耦
 4. **完整工具链** - 从开发到部署的全流程工具支持
 
-## 📈 扩展功能 (可选)
+## 📈 完整SLAM功能 (已集成)
 
-### 高级SLAM功能
-安装GTSAM库后可启用:
-- **回环检测** - pgo包提供位姿图优化
-- **重定位功能** - localizer包支持已知地图重定位
-- **地图优化** - hba包提供一致性地图优化
+### 四大核心组件
 
-### 安装方法
+#### 1. FastLIO2 (核心SLAM)
+- **功能**: 实时SLAM建图，提供基础里程计和稠密点云地图
+- **输入**: MID360点云和IMU数据
+- **输出**: 实时轨迹、点云地图、里程计信息
+- **特点**: 快速、鲁棒、适合实时应用
+
+#### 2. PGO (位姿图优化) 
+- **功能**: 回环检测和轨迹优化，减少累积误差  
+- **依赖**: GTSAM库
+- **输入**: FastLIO2的里程计和点云数据
+- **输出**: 优化后的全局一致轨迹
+- **特点**: 全局优化、消除漂移
+
+#### 3. HBA (分层束调整)
+- **功能**: 高精度地图优化和一致性调整
+- **依赖**: GTSAM库  
+- **输入**: 点云数据和轨迹估计
+- **输出**: 精化后的高质量地图
+- **特点**: 精度优化、噪声消除
+
+#### 4. Localizer (重定位系统)
+- **功能**: 基于已有地图的机器人重定位
+- **算法**: ICP点云配准
+- **输入**: 当前点云和参考地图
+- **输出**: 机器人在地图中的精确位置
+- **特点**: 快速重定位、无需GPS
+
+### 系统启动方式
 ```bash
-sudo apt install libgtsam-dev
-cd ws_livox
-colcon build  # 编译全部功能
+# 启动完整SLAM系统 (所有组件)
+./tools/slam_tools.sh start
+
+# 仅启动基础SLAM
+./tools/slam_tools.sh start-basic
+
+# 检查系统状态
+./tools/slam_tools.sh status
+
+# 安装GTSAM依赖 (PGO和HBA需要)
+./tools/slam_tools.sh gtsam
+
+### 地图保存功能
+```bash
+# 一键保存当前地图和轨迹
+./tools/slam_tools.sh save
+
+# 查看已保存的地图
+./tools/slam_tools.sh maps
+
+# 可视化地图文件
+./tools/slam_tools.sh view saved_maps/mid360_map_20250904_143000.pcd
 ```
+
+### 工作流程示例
+```bash
+# 1. 检查依赖状态
+./tools/slam_tools.sh deps
+
+# 2. 安装GTSAM (如需要)
+./tools/slam_tools.sh gtsam  
+
+# 3. 编译完整系统
+./tools/slam_tools.sh build
+
+# 4. 启动完整SLAM
+./tools/slam_tools.sh start
+
+# 5. 监控系统状态
+./tools/slam_tools.sh status
+./tools/slam_tools.sh monitor
+
+# 6. 保存建图结果
+./tools/slam_tools.sh save
+```
+
+## 🎛️ 系统配置
+
+### 统一配置文件
+- `config/full_slam_config.yaml` - 完整SLAM系统配置
+- `config/lio.yaml` - FastLIO2核心参数
+- `config/pgo.yaml` - 位姿图优化参数  
+- `config/hba.yaml` - 分层束调整参数
+- `config/localizer.yaml` - 重定位系统参数
 
 ## 🎯 应用场景
 

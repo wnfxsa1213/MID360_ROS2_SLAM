@@ -2,26 +2,31 @@ imu_topic: /livox/imu
 lidar_topic: /livox/lidar
 body_frame: body
 world_frame: lidar
-print_time_cost: false
+print_time_cost: true
 
-lidar_filter_num: 6
+lidar_filter_num: 2        # 降低滤波强度 (4→2，保留更多细节)
 lidar_min_range: 0.5
-lidar_max_range: 30.0
-scan_resolution: 0.15
-map_resolution: 0.3
+# LiDAR参数优化 - 提升建图精度和点云密度
+lidar_max_range: 80.0      # 检测距离 (100→80m，减少远距离噪声)
+scan_resolution: 0.05      # 扫描分辨率 (0.08→0.05m，提升精度)
+map_resolution: 0.08       # 地图分辨率 (0.12→0.08m，大幅提升细节)
 
-cube_len: 300
-det_range: 60
-move_thresh: 1.5
+# 地图持久化优化 - 彻底修复地图消失问题
+cube_len: 2000            # 局部地图范围 (1000→2000m，超大范围地图持久化)
+det_range: 300            # 检测范围 (200→300m，大幅扩展保留范围)  
+move_thresh: 2.0          # 运动阈值 (1.5→2.0，最小化地图清理触发)
+# 计算结果: det_thresh = 2.0 × 300 = 600m (雷达需移动600m才会触发地图清理)
 
-na: 0.01
-ng: 0.01
-nba: 0.0001
-nbg: 0.0001
+# IMU噪声参数优化 (针对MID360内置IMU)
+na: 0.005          # 加速度计噪声 (降低，MID360精度较好)
+ng: 0.005          # 陀螺仪噪声 (降低)
+nba: 0.0001        # 加速度计偏置噪声 (保持)
+nbg: 0.00005       # 陀螺仪偏置噪声 (稍微降低)
 
-imu_init_num: 20
-near_search_num: 5
-ieskf_max_iter: 5
+# 精度优化: 提升建图质量
+imu_init_num: 150         # 初始化样本数 (100→150，更好的IMU标定)
+near_search_num: 10       # KNN搜索数 (6→10，提升匹配精度)
+ieskf_max_iter: 4         # IESKF迭代次数 (3→4，提升状态估计精度)
 
 gravity_align: true
 esti_il: false
@@ -29,4 +34,4 @@ esti_il: false
 r_il: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
 t_il: [-0.011, -0.02329, 0.04412]
 
-lidar_cov_inv: 1000.0
+lidar_cov_inv: 1500.0

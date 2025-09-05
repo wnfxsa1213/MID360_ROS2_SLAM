@@ -30,6 +30,9 @@ public:
     static CloudType::Ptr transformCloud(CloudType::Ptr inp, const M3D &r, const V3D &t);
     M3D r_wl() { return m_kf->x().r_wi * m_kf->x().r_il; }
     V3D t_wl() { return m_kf->x().t_wi + m_kf->x().r_wi * m_kf->x().t_il; }
+    
+    // 获取全局累积地图点云
+    CloudType::Ptr getGlobalMap();
 
 private:
     Config m_config;

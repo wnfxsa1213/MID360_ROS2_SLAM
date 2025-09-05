@@ -18,6 +18,8 @@
   <depend>pcl_conversions</depend>
   <depend>livox_ros_driver2</depend>
   <depend>geometry_msgs</depend>
+  <depend>visualization_msgs</depend>
+  <depend>diagnostic_msgs</depend>
   <depend>sophus</depend>
   
 

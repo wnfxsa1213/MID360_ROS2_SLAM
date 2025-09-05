@@ -1,0 +1,76 @@
+# MID360 启动配置文件
+# 用于自定义启动参数
+
+# 网络配置
+network:
+  host_ip: "192.168.1.50"
+  lidar_ip: "192.168.1.3"
+  gateway: "192.168.1.1"
+  netmask: "255.255.255.0"
+  interface: "enp7s0"
+  
+  # 端口配置
+  ports:
+    cmd_data: 56100
+    push_msg: 56200  
+    point_data: 56300
+    imu_data: 56400
+    log_data: 56500
+
+# 雷达配置
+lidar:
+  # 数据类型: 0-笛卡尔坐标, 1-球坐标
+  pcl_data_type: 1
+  
+  # 发布频率 (Hz)
+  publish_freq: 10.0
+  
+  # 坐标系名称
+  frame_id: "livox_frame"
+  
+  # 外参标定 (相对于base_link)
+  extrinsic:
+    x: 0.0
+    y: 0.0  
+    z: 0.0
+    roll: 0.0
+    pitch: 0.0
+    yaw: 0.0
+
+# RViz配置
+rviz:
+  # 是否自动启动RViz
+  auto_start: true
+  
+  # 配置文件路径
+  config_file: ""
+  
+  # 显示选项
+  display:
+    pointcloud: true
+    trajectory: true
+    tf: true
+
+# 数据记录配置  
+rosbag:
+  # 是否自动录制
+  auto_record: false
+  
+  # 录制话题
+  topics:
+    - "/livox/lidar"
+    - "/livox/imu"
+    
+  # 存储路径
+  output_dir: "data/rosbags"
+
+# 调试选项
+debug:
+  # 日志级别: DEBUG, INFO, WARN, ERROR
+  log_level: "INFO"
+  
+  # 是否输出详细信息
+  verbose: false
+  
+  # 性能监控
+  performance_monitor: false

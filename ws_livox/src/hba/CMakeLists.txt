@@ -38,6 +38,8 @@ set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS}   ${OpenMP_C_FLAGS}")
 include_directories(
   ${EIGEN3_INCLUDE_DIR}
   ${PCL_INCLUDE_DIRS}
+  ${Sophus_INCLUDE_DIRS}
+  /opt/ros/humble/include
 )
 
 set(SRC_LIST src/hba/commons.cpp
@@ -45,7 +47,7 @@ set(SRC_LIST src/hba/commons.cpp
              src/hba/hba.cpp)
 
 add_executable(hba_node src/hba_node.cpp ${SRC_LIST})
-ament_target_dependencies(hba_node rclcpp std_msgs sensor_msgs interface pcl_conversions GTSAM)
+ament_target_dependencies(hba_node rclcpp std_msgs sensor_msgs interface pcl_conversions GTSAM Sophus)
 target_link_libraries(hba_node ${PCL_LIBRARIES} gtsam yaml-cpp)
 
 install(TARGETS hba_node DESTINATION lib/${PROJECT_NAME})

@@ -22,6 +22,10 @@ data/rosbags/
 *.log
 log.log
 
+# TF调试文件
+frames_*.gv
+frames_*.pdf
+
 # 临时文件
 *.tmp
 *.temp

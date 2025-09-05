@@ -17,7 +17,7 @@ endif()
 add_compile_definitions(SOPHUS_USE_BASIC_LOGGING)
 
 add_definitions(-DMP_EN)
-add_definitions(-DMP_PROC_NUM=2)
+add_definitions(-DMP_PROC_NUM=4)  # 增加并行处理线程数
 
 # find dependencies
 find_package(ament_cmake REQUIRED)
@@ -30,12 +30,16 @@ find_package(sensor_msgs REQUIRED)
 find_package(livox_ros_driver2 REQUIRED)
 find_package(pcl_conversions REQUIRED)
 find_package(geometry_msgs REQUIRED)
+find_package(visualization_msgs REQUIRED)
+find_package(diagnostic_msgs REQUIRED)
+find_package(interface REQUIRED)
 
 find_package(OpenMP QUIET)
 find_package(PCL REQUIRED)
 find_package(Eigen3 REQUIRED)
 find_package(Sophus REQUIRED)
 find_package(yaml-cpp REQUIRED)
+find_package(Boost REQUIRED COMPONENTS filesystem)
 
 
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${OpenMP_CXX_FLAGS}")
@@ -50,7 +54,7 @@ set(SRC_LIST src/map_builder/commons.cpp
              src/utils.cpp)
 
 add_executable(lio_node src/lio_node.cpp ${SRC_LIST})
-ament_target_dependencies(lio_node rclcpp std_msgs tf2 tf2_ros nav_msgs sensor_msgs livox_ros_driver2 pcl_conversions geometry_msgs)
+ament_target_dependencies(lio_node rclcpp std_msgs tf2 tf2_ros nav_msgs sensor_msgs livox_ros_driver2 pcl_conversions geometry_msgs visualization_msgs diagnostic_msgs interface)
 target_include_directories(lio_node PRIVATE 
   ${EIGEN3_INCLUDE_DIR}
   /opt/ros/humble/include
@@ -59,6 +63,7 @@ target_link_libraries(lio_node
   yaml-cpp
   ${PCL_LIBRARIES}
   Sophus::Sophus
+  ${Boost_LIBRARIES}
 )
 
 

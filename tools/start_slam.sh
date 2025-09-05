@@ -102,9 +102,9 @@ fi
 echo -e "${YELLOW}等待驱动初始化...${NC}"
 sleep 3
 
-# 2. 启动FASTLIO2 SLAM
+# 2. 启动增强版FASTLIO2 SLAM（包含可视化优化）
 start_node "fastlio2_slam" \
-    "ros2 launch fastlio2 lio_launch.py" \
+    "ros2 launch fastlio2 enhanced_visualization.launch.py" \
     "$LOG_DIR/fastlio2_slam.log"
 
 if [ $? -ne 0 ]; then
@@ -142,11 +142,14 @@ echo ""
 echo -e "${YELLOW}主要话题:${NC}"
 echo -e "  输入: /livox/lidar, /livox/imu"
 echo -e "  输出: /fastlio2/lio_odom, /fastlio2/lio_path, /fastlio2/world_cloud"
+echo -e "  新增: /fastlio2/imu_pose_marker, /fastlio2/performance_metrics, /fastlio2/diagnostics"
 
 echo ""
 echo -e "${YELLOW}常用命令:${NC}"
 echo -e "  查看话题: ${BLUE}ros2 topic list${NC}"
 echo -e "  监控里程计: ${BLUE}ros2 topic echo /fastlio2/lio_odom${NC}"
+echo -e "  性能监控: ${BLUE}ros2 topic echo /fastlio2/performance_metrics${NC}"
+echo -e "  系统诊断: ${BLUE}ros2 run rqt_robot_monitor rqt_robot_monitor${NC}"
 echo -e "  停止系统: ${BLUE}./stop_slam.sh${NC}"
 
 echo ""
@@ -154,7 +157,7 @@ echo -e "${GREEN}系统已就绪，可以开始SLAM建图！${NC}"
 echo -e "${YELLOW}按 Ctrl+C 或运行 ./stop_slam.sh 来停止系统${NC}"
 
 # 保持脚本运行并监控
-trap 'echo -e "\n${YELLOW}正在停止SLAM系统...${NC}"; /home/tianyu/codes/Mid360map/stop_slam.sh; exit' INT TERM
+trap 'echo -e "\n${YELLOW}正在停止SLAM系统...${NC}"; /home/tianyu/codes/Mid360map/tools/stop_slam.sh; exit' INT TERM
 
 # 监控循环
 while true; do

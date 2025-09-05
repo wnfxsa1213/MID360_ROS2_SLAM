@@ -1,0 +1,144 @@
+# MID360 完整SLAM系统配置文件
+# 统一管理FastLIO2、PGO、HBA、Localizer的启动参数
+
+# 系统级配置
+system:
+  # 网络配置 
+  host_ip: "192.168.1.50"      # 主机IP
+  lidar_ip: "192.168.1.3"      # MID360雷达IP
+  
+  # 启动配置
+  auto_start_components: true   # 是否自动启动所有组件
+  wait_time_between_nodes: 3    # 节点间启动等待时间(秒)
+  enable_debug_output: false    # 是否启用调试输出
+  
+  # 数据记录
+  enable_bag_recording: false   # 是否启用ROS包录制
+  bag_record_topics:           # 要录制的话题
+    - "/livox/lidar"
+    - "/livox/imu" 
+    - "/fastlio2/lio_odom"
+    - "/fastlio2/body_cloud"
+
+# FastLIO2核心SLAM配置
+fastlio2:
+  enabled: true                 # 是否启用FastLIO2
+  config_file: "config/lio.yaml"
+  launch_file: "enhanced_visualization.launch.py"
+  required: true               # 必需组件
+  
+  # 输出话题
+  output_topics:
+    odometry: "/fastlio2/lio_odom"
+    point_cloud: "/fastlio2/body_cloud"
+    path: "/fastlio2/lio_path"
+    world_cloud: "/fastlio2/world_cloud"
+
+# 位姿图优化(PGO)配置
+pgo:
+  enabled: true                 # 是否启用PGO
+  config_file: "config/pgo.yaml"
+  launch_file: "pgo_launch.py"
+  required: false              # 可选组件
+  depends_on: ["fastlio2"]     # 依赖FastLIO2
+  requires_gtsam: true         # 需要GTSAM库
+  
+  # 关键参数
+  loop_detection:
+    enabled: true
+    search_radius: 1.0         # 回环搜索半径(m)
+    time_threshold: 60.0       # 时间阈值(s)
+    score_threshold: 0.15      # 匹配分数阈值
+  
+  keyframe_extraction:
+    delta_translation: 0.5     # 关键帧平移阈值(m)  
+    delta_rotation: 10         # 关键帧旋转阈值(度)
+
+# 分层束调整(HBA)配置
+hba:
+  enabled: true                 # 是否启用HBA
+  config_file: "config/hba.yaml"
+  launch_file: "hba_launch.py"
+  required: false              # 可选组件
+  depends_on: ["fastlio2"]     # 依赖FastLIO2
+  requires_gtsam: true         # 需要GTSAM库
+  
+  # 优化参数
+  optimization:
+    window_size: 20            # 滑动窗口大小
+    stride: 10                 # 处理步长
+    max_iterations: 10         # 最大迭代次数
+    convergence_threshold: 0.01 # 收敛阈值
+  
+  # 点云处理
+  point_cloud:
+    voxel_size: 0.5           # 体素大小(m)
+    min_points: 10            # 最小点数
+    downsample_resolution: 0.1 # 降采样分辨率(m)
+
+# 定位器(Localizer)配置  
+localizer:
+  enabled: true                 # 是否启用Localizer
+  config_file: "config/localizer.yaml"
+  launch_file: "localizer_launch.py" 
+  required: false              # 可选组件
+  depends_on: ["fastlio2"]     # 依赖FastLIO2
+  requires_gtsam: false        # 不需要GTSAM库
+  
+  # ICP配置
+  icp_settings:
+    max_iterations: 100        # 最大迭代次数
+    transformation_epsilon: 1e-6  # 变换收敛阈值
+    euclidean_fitness_epsilon: 0.01 # 欧几里得适应度阈值
+    max_correspondence_distance: 0.5 # 最大对应距离
+  
+  # 重定位
+  relocalization:
+    enabled: true
+    search_radius: 2.0         # 搜索半径(m)
+    confidence_threshold: 0.8  # 置信度阈值
+
+# 可视化配置
+visualization:
+  rviz_enabled: true           # 是否启动RViz
+  rviz_config: "enhanced_fastlio2.rviz"
+  
+  # 显示设置
+  display_settings:
+    show_trajectory: true      # 显示轨迹
+    show_point_cloud: true     # 显示点云
+    show_keyframes: true       # 显示关键帧
+    show_loop_closures: true   # 显示回环检测
+    point_size: 2              # 点云大小
+    trajectory_width: 0.1      # 轨迹线宽
+
+# 性能监控
+monitoring:
+  enabled: true                # 是否启用监控
+  publish_diagnostics: true    # 发布诊断信息
+  log_performance: true        # 记录性能日志
+  
+  # 性能阈值
+  thresholds:
+    max_processing_time: 50    # 最大处理时间(ms)
+    min_point_cloud_size: 5000 # 最小点云大小
+    max_memory_usage: 4096     # 最大内存使用(MB)
+
+# 地图保存配置
+map_saving:
+  auto_save_enabled: false     # 是否自动保存
+  auto_save_interval: 300      # 自动保存间隔(秒)
+  save_directory: "./saved_maps"
+  
+  # 保存格式
+  formats:
+    point_cloud: "pcd"         # 点云格式: pcd/ply
+    trajectory: "txt"          # 轨迹格式
+    optimized_map: "pcd"       # 优化后地图格式
+  
+  # 保存内容
+  save_content:
+    raw_map: true              # 原始地图
+    optimized_map: true        # 优化后地图 (如果有PGO/HBA)
+    trajectory: true           # 轨迹数据
+    keyframes: true            # 关键帧

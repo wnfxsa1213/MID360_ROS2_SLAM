@@ -266,3 +266,37 @@ CloudType::Ptr LidarProcessor::transformCloud(CloudType::Ptr inp, const M3D &r, 
     pcl::transformPointCloud(*inp, *ret, transform);
     return ret;
 }
+
+CloudType::Ptr LidarProcessor::getGlobalMap()
+{
+    CloudType::Ptr global_map(new CloudType);
+    
+    // 检查ikd-tree状态
+    if (!m_ikdtree || !m_ikdtree->Root_Node) {
+        return global_map;  // 返回空点云
+    }
+    
+    // 使用ikd-tree的flatten方法获取所有点
+    typename KD_TREE<PointType>::PointVector all_points;
+    m_ikdtree->flatten(m_ikdtree->Root_Node, all_points, delete_point_storage_set::NOT_RECORD);
+    
+    // 预分配内存以提升性能
+    global_map->points.reserve(all_points.size());
+    
+    // 将PointVector转换为CloudType，应用质量滤波
+    for (const auto& point : all_points) {
+        // 简单的质量滤波：排除异常点
+        if (std::isfinite(point.x) && std::isfinite(point.y) && std::isfinite(point.z)) {
+            float distance = sqrt(point.x*point.x + point.y*point.y + point.z*point.z);
+            if (distance > 0.1 && distance < 80.0) {  // 合理的距离范围
+                global_map->points.push_back(point);
+            }
+        }
+    }
+    
+    global_map->width = global_map->points.size();
+    global_map->height = 1;
+    global_map->is_dense = true;
+    
+    return global_map;
+}

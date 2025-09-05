@@ -5,9 +5,6 @@ from launch_ros.substitutions import FindPackageShare
 
 
 def generate_launch_description():
-    rviz_cfg = PathJoinSubstitution(
-        [FindPackageShare("localizer"), "rviz", "localizer.rviz"]
-    )
     localizer_config_path = PathJoinSubstitution(
         [FindPackageShare("localizer"), "config", "localizer.yaml"]
     )
@@ -41,13 +38,6 @@ def generate_launch_description():
                     }
                 ],
             ),
-            launch_ros.actions.Node(
-                package="rviz2",
-                namespace="localizer",
-                executable="rviz2",
-                name="rviz2",
-                output="screen",
-                arguments=["-d", rviz_cfg.perform(launch.LaunchContext())],
-            )
+            # RViz节点已移除 - Localizer功能保留，需要时通过服务调用重定位
         ]
     )

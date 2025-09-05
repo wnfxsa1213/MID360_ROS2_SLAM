@@ -15,100 +15,109 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 构建和开发命令
 
-### 编译项目
+### 使用便捷脚本（推荐）
 ```bash
-# 标准ROS2编译（推荐）
-colcon build --cmake-args -DCMAKE_BUILD_TYPE=Release
-
-# 调试版本编译
-colcon build --cmake-args -DCMAKE_BUILD_TYPE=Debug
-
-# 仅编译本包
-colcon build --packages-select mid360_mapping
-
-# 并行编译（加速）
-colcon build --parallel-workers 4
+# 使用SLAM工具集脚本（推荐）
+./tools/slam_tools.sh help     # 查看所有可用命令
+./tools/slam_tools.sh fix      # 修复已知编译问题
+./tools/slam_tools.sh build    # 按依赖顺序编译系统
+./tools/slam_tools.sh start    # 启动SLAM系统
+./tools/slam_tools.sh status   # 检查系统状态
+./tools/slam_tools.sh monitor  # 实时监控数据流
 ```
 
-### 运行和测试
+### 手动编译项目
 ```bash
+# 进入ROS2工作空间
+cd ws_livox
+
+# 按依赖顺序编译（重要）
+colcon build --packages-select interface --cmake-args -DCMAKE_BUILD_TYPE=Release
+colcon build --packages-select livox_ros_driver2 --cmake-args -DCMAKE_BUILD_TYPE=Release
+colcon build --packages-select fastlio2 --cmake-args -DCMAKE_BUILD_TYPE=Release
+
 # 设置环境变量（必须）
 source install/setup.bash
-
-# 运行单独的节点
-ros2 run mid360_mapping mid360_receiver
-ros2 run mid360_mapping fast_lio2_node
-ros2 run mid360_mapping visualization_node
-ros2 run mid360_mapping system_monitor
-
-# 运行测试
-colcon test --packages-select mid360_mapping
-colcon test-result --verbose
-
-# 运行特定测试
-colcon test --packages-select mid360_mapping --ctest-args -R test_data_converter
-colcon test --packages-select mid360_mapping --ctest-args -R test_fast_lio2
 ```
 
 ### 启动系统
 ```bash
-# 启动系统前先安装依赖和配置网络
-./scripts/install_deps.sh
-sudo ./scripts/setup_network.sh
+# 方法1：使用便捷脚本（推荐）
+./tools/slam_tools.sh start
 
-# 启动完整系统（当launch文件存在时）
-ros2 launch mid360_mapping full_system.launch.py
+# 方法2：使用launch文件
+cd ws_livox
+source install/setup.bash
+ros2 launch fastlio2 enhanced_visualization.launch.py
 
-# 或使用脚本启动
-./scripts/start_system.sh
+# 方法3：使用启动脚本
+./tools/start_slam.sh
 ```
 
-### 开发工具命令
+### 系统监控和调试
 ```bash
-# 代码质量检查
-ament_cpplint src/
-ament_cppcheck src/
-ament_uncrustify --reformat src/
+# 实时监控数据流
+./tools/slam_tools.sh monitor
 
-# 依赖管理
-rosdep check --from-paths src --ignore-src -r
-rosdep install --from-paths src --ignore-src -r -y
+# 查看系统状态
+./tools/slam_tools.sh status
 
-# 构建清理
-rm -rf build install log
-colcon build --cmake-clean-cache
+# 查看话题和节点
+./tools/slam_tools.sh topics
+./tools/slam_tools.sh nodes
+
+# 网络配置检查
+./tools/slam_tools.sh network
+
+# 查看系统日志
+./tools/slam_tools.sh log
+```
+
+### 故障排除和修复
+```bash
+# 修复已知编译问题
+./tools/slam_tools.sh fix
+
+# 清理并重新编译
+./tools/slam_tools.sh clean
+./tools/slam_tools.sh build
+
+# 重启系统
+./tools/slam_tools.sh restart
 ```
 
 ## 代码架构
 
 ### 核心组件
 
-项目基于ROS2架构，主要包含以下可执行节点：
+项目基于ROS2架构，当前实现的主要组件：
 
-1. **MID360数据接收节点** (`mid360_receiver`)
-   - 源文件：`src/mid360_driver/mid360_receiver.cpp`
-   - 处理MID360激光雷达的UDP数据接收和光纤传输
-   - 依赖：`src/utils/data_converter.cpp`
+1. **Livox MID360驱动节点** (`livox_ros_driver2`)
+   - 位置：`ws_livox/src/livox_ros_driver2/`
+   - 功能：MID360激光雷达数据采集和发布
+   - 配置：`ws_livox/src/livox_ros_driver2/config/MID360_config.json`
+   - 话题：发布点云数据到`/livox/lidar`，IMU数据到`/livox/imu`
 
-2. **FAST-LIO2 SLAM节点** (`fast_lio2_node`)
-   - 主文件：`src/fast_lio2/fast_lio2_node.cpp`
-   - ikd-Tree实现：`src/fast_lio2/ikd_Tree.cpp`
-   - IMU处理：`src/fast_lio2/IMU_Processing.cpp`
-   - 点云预处理：`src/fast_lio2/preprocess.cpp`
-   - 通用库：`src/utils/common_lib.cpp`
+2. **FAST-LIO2 SLAM节点** (`fastlio2`)
+   - 位置：`ws_livox/src/fastlio2/`
+   - 主要文件：`src/lio_node.cpp`（SLAM核心实现）
+   - 配置文件：`config/lio.yaml`
+   - 功能：实时SLAM定位建图，输出里程计和地图点云
+   - 话题：订阅雷达和IMU数据，发布里程计和地图
 
-3. **可视化节点** (`visualization_node`)
-   - 源文件：`src/visualization/visualization_node.cpp`
-   - 标记工具：`src/utils/marker_utils.cpp`
-   - 实时RViz显示建图结果和机器人轨迹
+3. **增强可视化系统**
+   - Launch文件：`ws_livox/src/fastlio2/launch/enhanced_visualization.launch.py`
+   - RViz配置：`ws_livox/src/fastlio2/rviz/enhanced_fastlio2.rviz`
+   - 功能：实时显示建图过程、轨迹和点云数据
 
-4. **系统监控节点** (`system_monitor`)
-   - 源文件：`src/utils/system_monitor.cpp`
-   - 监控系统性能和资源使用
+4. **接口包** (`interface`)
+   - 位置：`ws_livox/src/interface/`
+   - 功能：定义自定义消息和服务接口
 
-5. **Livox驱动** (子模块)
-   - 位置：`src/livox_ros_driver2/`
-   - 提供MID360硬件驱动支持
+5. **系统管理工具**
+   - SLAM工具集：`tools/slam_tools.sh`（完整的系统管理和调试工具）
+   - 启动脚本：`tools/start_slam.sh`
+   - 配置管理：`config/launch_config.yaml`
 
 ### 数据流架构
 
@@ -121,43 +130,91 @@ MID360雷达 -> UDP数据接收 -> 点云/IMU数据 -> FAST-LIO2算法 -> 地图
 
 ### 关键配置文件
 
-- `config/mid360_config.yaml`: MID360雷达配置，包括网络设置(IP: 192.168.1.100/192.168.1.50)、扫描参数、光纤传输优化
-- `config/fast_lio2.yaml`: FAST-LIO2算法完整配置，包含预处理、IMU参数、建图参数、外参标定等
-- `src/livox_ros_driver2/config/`: Livox驱动原生配置文件
-- `package.xml`: ROS2包依赖定义
-- `CMakeLists.txt`: 构建配置，定义4个主要可执行文件
+**系统级配置：**
+- `config/launch_config.yaml`: 系统启动配置，包含网络设置(主机IP: 192.168.1.50, 雷达IP: 192.168.1.3)、端口配置、调试选项
+- `tools/slam_tools.sh`: SLAM系统管理工具集，提供编译、启动、监控等功能
+
+**Livox驱动配置：**
+- `ws_livox/src/livox_ros_driver2/config/MID360_config.json`: MID360雷达硬件配置
+- `ws_livox/src/livox_ros_driver2/CMakeLists.txt`: 驱动编译配置（已修复ROS版本检测问题）
+
+**FAST-LIO2配置：**
+- `ws_livox/src/fastlio2/config/lio.yaml`: SLAM算法核心配置，包含IMU参数、建图参数、外参标定等
+- `ws_livox/src/fastlio2/package.xml`: ROS2包依赖定义
+- `ws_livox/src/fastlio2/CMakeLists.txt`: SLAM核心编译配置
+
+**可视化配置：**
+- `ws_livox/src/fastlio2/launch/enhanced_visualization.launch.py`: 增强可视化启动文件
+- `ws_livox/src/fastlio2/rviz/enhanced_fastlio2.rviz`: RViz显示配置
 
 ### ROS2话题结构
 
-**输入话题:**
+**Livox驱动输出话题:**
 - `/livox/lidar` (sensor_msgs/PointCloud2): MID360点云数据
-- `/livox/imu` (sensor_msgs/Imu): IMU数据
+- `/livox/imu` (sensor_msgs/Imu): IMU数据  
+- `/livox/status` (std_msgs/UInt8): 设备状态信息
 
-**输出话题:**
-- `/Odometry` (nav_msgs/Odometry): SLAM里程计输出
-- `/trajectory` (nav_msgs/Path): 机器人轨迹
-- `/map_cloud` (sensor_msgs/PointCloud2): 建图结果
+**FAST-LIO2 SLAM输出话题:**
+- `/fastlio2/lio_odom` (nav_msgs/Odometry): SLAM里程计输出
+- `/fastlio2/body` (sensor_msgs/PointCloud2): 机体坐标系点云
+- `/fastlio2/path` (nav_msgs/Path): SLAM轨迹路径
+- `/fastlio2/residual_point` (sensor_msgs/PointCloud2): 残差点云
+
+**TF变换发布:**
+- `odom -> base_link`: SLAM位姿变换
+- `base_link -> livox_frame`: 雷达外参变换
+
+**系统监控话题:**
+- 可通过`./tools/slam_tools.sh monitor`实时查看话题状态和频率
 
 ### 开发注意事项
 
-1. **编译要求**: 需要C++17标准，使用OpenMP并行化，依赖PCL、Eigen3等库
-2. **网络配置**: MID360默认IP为192.168.1.1XX (XX为SN后两位)，地面端配置为192.168.1.50
-3. **时间同步**: 支持软件时间同步，光纤传输延迟<1ms，可配置时间偏移
-4. **性能优化**: 使用OpenMP并行化，支持100Hz实时处理，ikd-Tree高效点云管理
-5. **坐标系**: 使用ROS2标准坐标系(base_link, livox_frame, camera_init)，支持TF发布
-6. **数据格式**: 支持PointCloud2格式，可配置降采样和滤波参数
-7. **依赖管理**: 项目依赖livox_ros_driver2子模块，需要正确初始化
-8. **测试覆盖**: 包含数据转换和FAST-LIO2核心模块的单元测试
+1. **编译顺序**: 必须按依赖顺序编译：interface → livox_ros_driver2 → fastlio2
+2. **已知问题修复**: livox_ros_driver2存在ROS版本检测问题，使用`./tools/slam_tools.sh fix`自动修复
+3. **网络配置**: 系统配置为主机IP 192.168.1.50，雷达IP 192.168.1.3，需要相应网络设置
+4. **环境依赖**: 需要ROS2 Humble、C++17编译器、PCL、Eigen3等库
+5. **启动方式**: 推荐使用`./tools/slam_tools.sh start`启动系统，支持自动环境配置
+6. **坐标系**: 使用标准ROS坐标系(odom, base_link, livox_frame)
+7. **性能监控**: 使用`./tools/slam_tools.sh monitor`实时监控数据流和系统状态
+8. **调试工具**: slam_tools.sh提供完整的调试工具集，包括日志查看、网络检查等
+9. **可视化**: 支持增强RViz配置，自动显示点云、轨迹和TF变换
+10. **配置管理**: 统一使用`config/launch_config.yaml`管理系统参数
 
-### 测试策略
+### 当前开发状态
 
-- 单元测试覆盖数据转换和核心算法模块
-- 集成测试验证完整SLAM流程
-- 性能测试确保实时性要求
+**已完成组件：**
+- ✅ Livox MID360驱动集成
+- ✅ FAST-LIO2 SLAM核心实现
+- ✅ 增强可视化系统（RViz配置）
+- ✅ 系统管理工具集（slam_tools.sh）
+- ✅ 编译问题修复机制
+- ✅ 配置文件统一管理
+- ✅ 自动化启动脚本
 
-### 故障排除
+**测试和验证：**
+- 🔄 系统集成测试（进行中）
+- 🔄 实时性能验证（进行中）
+- ⏳ 长时间稳定性测试（待进行）
 
-1. **网络连接问题**: 检查IP配置和光纤连接
-2. **数据延迟**: 监控网络带宽和系统负载
-3. **建图精度**: 调整FAST-LIO2参数，特别是体素大小和迭代次数
-4. **内存使用**: 监控ikd-Tree大小和点云数量限制
+### 故障排除指南
+
+**编译问题：**
+1. 运行`./tools/slam_tools.sh fix`修复已知问题
+2. 按顺序重新编译：`./tools/slam_tools.sh build`
+3. 清理后重新编译：`./tools/slam_tools.sh clean && ./tools/slam_tools.sh build`
+
+**网络连接问题：**
+1. 检查网络配置：`./tools/slam_tools.sh network`
+2. 验证雷达连接：ping 192.168.1.3
+3. 检查接口配置：修改`config/launch_config.yaml`中的网络设置
+
+**SLAM性能问题：**
+1. 实时监控数据流：`./tools/slam_tools.sh monitor`
+2. 查看系统状态：`./tools/slam_tools.sh status`
+3. 检查系统日志：`./tools/slam_tools.sh log`
+4. 调整FAST-LIO2参数：修改`ws_livox/src/fastlio2/config/lio.yaml`
+
+**可视化问题：**
+1. 启动RViz：`./tools/slam_tools.sh rviz`
+2. 检查话题发布：`./tools/slam_tools.sh topics`
+3. 验证TF变换：`ros2 run tf2_tools view_frames`

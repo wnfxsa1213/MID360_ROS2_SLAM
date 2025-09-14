@@ -2,6 +2,7 @@
 #include <nav_msgs/msg/odometry.hpp>
 #include <sensor_msgs/msg/point_cloud2.hpp>
 #include <geometry_msgs/msg/pose_stamped.hpp>
+#include <geometry_msgs/msg/pose_array.hpp>
 #include <geometry_msgs/msg/point.hpp>
 #include <tf2_ros/transform_broadcaster.h>
 #include <message_filters/subscriber.h>
@@ -15,6 +16,9 @@
 #include "pgos/commons.h"
 #include "pgos/simple_pgo.h"
 #include "interface/srv/save_maps.hpp"
+#include "interface/srv/update_pose.hpp"
+#include "interface/srv/refine_map.hpp"
+#include "interface/srv/save_poses.hpp"
 #include <pcl/io/io.h>
 #include <fstream>
 #include <yaml-cpp/yaml.h>
@@ -48,12 +52,20 @@ public:
         m_cloud_sub.subscribe(this, m_node_config.cloud_topic, qos.get_rmw_qos_profile());
         m_odom_sub.subscribe(this, m_node_config.odom_topic, qos.get_rmw_qos_profile());
         m_loop_marker_pub = this->create_publisher<visualization_msgs::msg::MarkerArray>("/pgo/loop_markers", 10000);
+        m_optimized_poses_pub = this->create_publisher<geometry_msgs::msg::PoseArray>("/pgo/optimized_poses", 1000);
         m_tf_broadcaster = std::make_shared<tf2_ros::TransformBroadcaster>(*this);
         m_sync = std::make_shared<message_filters::Synchronizer<message_filters::sync_policies::ApproximateTime<sensor_msgs::msg::PointCloud2, nav_msgs::msg::Odometry>>>(message_filters::sync_policies::ApproximateTime<sensor_msgs::msg::PointCloud2, nav_msgs::msg::Odometry>(10), m_cloud_sub, m_odom_sub);
         m_sync->setAgePenalty(0.1);
         m_sync->registerCallback(std::bind(&PGONode::syncCB, this, std::placeholders::_1, std::placeholders::_2));
         m_timer = this->create_wall_timer(50ms, std::bind(&PGONode::timerCB, this));
         m_save_map_srv = this->create_service<interface::srv::SaveMaps>("/pgo/save_maps", std::bind(&PGONode::saveMapsCB, this, std::placeholders::_1, std::placeholders::_2));
+        
+        // 创建位姿更新客户端，用于向FAST-LIO2反馈优化结果
+        m_update_pose_client = this->create_client<interface::srv::UpdatePose>("fastlio2/update_pose");
+        
+        // 创建HBA客户端，用于在线精细化
+        m_hba_refine_client = this->create_client<interface::srv::RefineMap>("/hba/refine_map");
+        m_hba_save_client = this->create_client<interface::srv::SavePoses>("/hba/save_poses");
     }
 
     void loadParameters()
@@ -81,6 +93,17 @@ public:
         m_pgo_config.loop_submap_half_range = config["loop_submap_half_range"].as<int>();
         m_pgo_config.submap_resolution = config["submap_resolution"].as<double>();
         m_pgo_config.min_loop_detect_duration = config["min_loop_detect_duration"].as<double>();
+        
+        // 加载新增的增强功能参数（带默认值）
+        m_pgo_config.enable_pose_feedback = config["enable_pose_feedback"].as<bool>(true);
+        m_pgo_config.feedback_frequency_hz = config["feedback_frequency_hz"].as<double>(2.0);
+        m_pgo_config.max_optimization_time_ms = config["max_optimization_time_ms"].as<int>(200);
+        m_pgo_config.enable_loop_visualization = config["enable_loop_visualization"].as<bool>(true);
+        m_pgo_config.keyframe_skip_distance = config["keyframe_skip_distance"].as<double>(0.1);
+        
+        RCLCPP_INFO(this->get_logger(), "PGO配置已加载 - 关键帧阈值: %.2fm/%.1f°, 回环搜索: %.1fm/%.1fs", 
+                   m_pgo_config.key_pose_delta_trans, m_pgo_config.key_pose_delta_deg,
+                   m_pgo_config.loop_search_radius, m_pgo_config.loop_time_tresh);
     }
     void syncCB(const sensor_msgs::msg::PointCloud2::ConstSharedPtr &cloud_msg, const nav_msgs::msg::Odometry::ConstSharedPtr &odom_msg)
     {
@@ -108,6 +131,13 @@ public:
 
     void sendBroadCastTF(builtin_interfaces::msg::Time &time)
     {
+        // 防止自引用变换（frame_id与child_frame_id相同）
+        if (m_node_config.map_frame == m_node_config.local_frame) {
+            RCLCPP_WARN_ONCE(this->get_logger(), "PGO跳过自引用TF变换: %s -> %s", 
+                             m_node_config.map_frame.c_str(), m_node_config.local_frame.c_str());
+            return;
+        }
+
         geometry_msgs::msg::TransformStamped transformStamped;
         transformStamped.header.frame_id = m_node_config.map_frame;
         transformStamped.child_frame_id = m_node_config.local_frame;
@@ -215,9 +245,17 @@ public:
 
         m_pgo->smoothAndUpdate();
 
+        // 将优化后的最新位姿反馈给FAST-LIO2（根据配置决定）
+        if (m_pgo_config.enable_pose_feedback) {
+            sendPoseUpdateToFASTLIO2();
+        }
+
         sendBroadCastTF(cur_time);
 
         publishLoopMarkers(cur_time);
+        
+        // 发布优化后的关键帧位姿给HBA
+        publishOptimizedPoses();
     }
 
     void saveMapsCB(const std::shared_ptr<interface::srv::SaveMaps::Request> request, std::shared_ptr<interface::srv::SaveMaps::Response> response)
@@ -280,8 +318,73 @@ public:
         }
         txt_file.close();
         pcl::io::savePCDFileBinary(map_path.string(), *ret);
+        
+        // 如果保存了patches，则自动触发HBA在线精细化
+        if (request->save_patches && request->enable_hba_refine) {
+            triggerHBARefinement(p_dir.string());
+        }
+        
         response->success = true;
         response->message = "SAVE SUCCESS!";
+    }
+
+    void triggerHBARefinement(const std::string& maps_path)
+    {
+        if (!m_hba_refine_client->wait_for_service(std::chrono::milliseconds(500))) {
+            RCLCPP_WARN(this->get_logger(), "HBA refine service not available, skipping refinement");
+            return;
+        }
+        
+        auto request = std::make_shared<interface::srv::RefineMap::Request>();
+        request->maps_path = maps_path;
+        
+        RCLCPP_INFO(this->get_logger(), "触发HBA在线精细化优化: %s", maps_path.c_str());
+        
+        // 异步调用HBA精细化服务
+        auto result_future = m_hba_refine_client->async_send_request(
+            request,
+            [this](rclcpp::Client<interface::srv::RefineMap>::SharedFuture future) {
+                try {
+                    auto response = future.get();
+                    if (response->success) {
+                        RCLCPP_INFO(this->get_logger(), "HBA在线精细化成功: %s", response->message.c_str());
+                        // 精细化完成后，可以保存优化后的位姿
+                        saveHBARefinedPoses();
+                    } else {
+                        RCLCPP_WARN(this->get_logger(), "HBA在线精细化失败: %s", response->message.c_str());
+                    }
+                } catch (const std::exception& e) {
+                    RCLCPP_ERROR(this->get_logger(), "HBA在线精细化异常: %s", e.what());
+                }
+            }
+        );
+    }
+    
+    void saveHBARefinedPoses()
+    {
+        if (!m_hba_save_client->wait_for_service(std::chrono::milliseconds(500))) {
+            RCLCPP_WARN(this->get_logger(), "HBA save service not available");
+            return;
+        }
+        
+        auto request = std::make_shared<interface::srv::SavePoses::Request>();
+        request->file_path = "/tmp/hba_refined_poses.txt";
+        
+        auto result_future = m_hba_save_client->async_send_request(
+            request,
+            [this](rclcpp::Client<interface::srv::SavePoses>::SharedFuture future) {
+                try {
+                    auto response = future.get();
+                    if (response->success) {
+                        RCLCPP_INFO(this->get_logger(), "HBA优化位姿保存成功: %s", response->message.c_str());
+                    } else {
+                        RCLCPP_WARN(this->get_logger(), "HBA优化位姿保存失败: %s", response->message.c_str());
+                    }
+                } catch (const std::exception& e) {
+                    RCLCPP_ERROR(this->get_logger(), "HBA位姿保存异常: %s", e.what());
+                }
+            }
+        );
     }
 
 private:
@@ -291,11 +394,121 @@ private:
     std::shared_ptr<SimplePGO> m_pgo;
     rclcpp::TimerBase::SharedPtr m_timer;
     rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr m_loop_marker_pub;
+    rclcpp::Publisher<geometry_msgs::msg::PoseArray>::SharedPtr m_optimized_poses_pub;
     rclcpp::Service<interface::srv::SaveMaps>::SharedPtr m_save_map_srv;
+    rclcpp::Client<interface::srv::UpdatePose>::SharedPtr m_update_pose_client;
+    rclcpp::Client<interface::srv::RefineMap>::SharedPtr m_hba_refine_client;
+    rclcpp::Client<interface::srv::SavePoses>::SharedPtr m_hba_save_client;
     message_filters::Subscriber<sensor_msgs::msg::PointCloud2> m_cloud_sub;
     message_filters::Subscriber<nav_msgs::msg::Odometry> m_odom_sub;
     std::shared_ptr<tf2_ros::TransformBroadcaster> m_tf_broadcaster;
     std::shared_ptr<message_filters::Synchronizer<message_filters::sync_policies::ApproximateTime<sensor_msgs::msg::PointCloud2, nav_msgs::msg::Odometry>>> m_sync;
+
+    // 向FAST-LIO2发送优化后的位姿（增强版本）
+    void sendPoseUpdateToFASTLIO2()
+    {
+        if (!m_update_pose_client || m_pgo->keyPoses().empty()) {
+            RCLCPP_DEBUG(this->get_logger(), "UpdatePose客户端未初始化或无关键帧");
+            return;
+        }
+
+        // 检查服务是否可用
+        int timeout_ms = std::min(m_pgo_config.max_optimization_time_ms / 2, 100);
+        if (!m_update_pose_client->wait_for_service(std::chrono::milliseconds(timeout_ms))) {
+            RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 5000, 
+                "FAST-LIO2 位姿更新服务不可用 (超时: %dms)", timeout_ms);
+            return;
+        }
+
+        // 获取最新的优化后位姿
+        const auto& latest_pose = m_pgo->keyPoses().back();
+        
+        // 创建服务请求
+        auto request = std::make_shared<interface::srv::UpdatePose::Request>();
+        request->timestamp = latest_pose.time;  // 时间戳
+        request->x = latest_pose.t_global.x();
+        request->y = latest_pose.t_global.y();
+        request->z = latest_pose.t_global.z();
+        
+        Eigen::Quaterniond q(latest_pose.r_global);
+        q.normalize(); // 确保四元数标准化
+        request->qw = q.w();
+        request->qx = q.x();
+        request->qy = q.y();
+        request->qz = q.z();
+
+        RCLCPP_DEBUG(this->get_logger(), "发送位姿更新: [%.3f, %.3f, %.3f] at time %.3f",
+                    request->x, request->y, request->z, request->timestamp);
+
+        // 异步调用服务（避免阻塞）
+        auto result_future = m_update_pose_client->async_send_request(request);
+        
+        // 根据配置的最大优化时间等待结果
+        int wait_timeout = m_pgo_config.max_optimization_time_ms / 4; // 不超过1/4的优化时间
+        if (result_future.wait_for(std::chrono::milliseconds(wait_timeout)) == std::future_status::ready) {
+            try {
+                auto response = result_future.get();
+                if (response->success) {
+                    RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 3000,
+                        "✅ PGO位姿反馈成功: [%.3f, %.3f, %.3f] -> FAST-LIO2",
+                        request->x, request->y, request->z);
+                    
+                    // 增加成功计数器（可用于统计）
+                    static int success_count = 0;
+                    success_count++;
+                } else {
+                    RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+                        "❌ FAST-LIO2位姿更新失败: %s", response->message.c_str());
+                }
+            } catch (const std::exception& e) {
+                RCLCPP_ERROR_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
+                    "位姿更新异常: %s", e.what());
+            }
+        } else {
+            RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 3000,
+                "位姿更新超时 (%dms)，继续执行", wait_timeout);
+        }
+    }
+    
+    // 发布优化后的关键帧位姿给HBA（新增功能）
+    void publishOptimizedPoses()
+    {
+        if (!m_optimized_poses_pub || m_pgo->keyPoses().empty()) {
+            return;
+        }
+        
+        geometry_msgs::msg::PoseArray pose_array;
+        pose_array.header.stamp = this->now();
+        pose_array.header.frame_id = m_node_config.map_frame;
+        
+        // 获取所有优化后的关键帧位姿
+        const auto& key_poses = m_pgo->keyPoses();
+        pose_array.poses.reserve(key_poses.size());
+        
+        for (const auto& kp : key_poses) {
+            geometry_msgs::msg::Pose pose;
+            
+            // 位置
+            pose.position.x = kp.t_global.x();
+            pose.position.y = kp.t_global.y();
+            pose.position.z = kp.t_global.z();
+            
+            // 旋转（转换为四元数）
+            Eigen::Quaterniond q(kp.r_global);
+            q.normalize();
+            pose.orientation.w = q.w();
+            pose.orientation.x = q.x();
+            pose.orientation.y = q.y();
+            pose.orientation.z = q.z();
+            
+            pose_array.poses.push_back(pose);
+        }
+        
+        // 发布给HBA监控
+        m_optimized_poses_pub->publish(pose_array);
+        
+        RCLCPP_DEBUG(this->get_logger(), "发布%zu个优化位姿给HBA", pose_array.poses.size());
+    }
 };
 
 int main(int argc, char **argv)

@@ -11,6 +11,7 @@
 
 #include "interface/srv/save_maps.hpp"
 #include "interface/srv/save_poses.hpp"
+#include "interface/srv/update_pose.hpp"
 #include <pcl/io/pcd_io.h>
 #include <pcl/io/ply_io.h>
 #include <fstream>
@@ -20,6 +21,7 @@
 #include "utils.h"
 #include "map_builder/commons.h"
 #include "map_builder/map_builder.h"
+#include "map_builder/ieskf.h"
 
 #include <pcl_conversions/pcl_conversions.h>
 #include "tf2_ros/transform_broadcaster.h"
@@ -83,6 +85,11 @@ public:
         m_save_poses_service = this->create_service<interface::srv::SavePoses>(
             "fastlio2/save_poses", 
             std::bind(&LIONode::savePosesCB, this, std::placeholders::_1, std::placeholders::_2));
+
+        // 创建PGO位姿更新服务
+        m_update_pose_service = this->create_service<interface::srv::UpdatePose>(
+            "fastlio2/update_pose",
+            std::bind(&LIONode::updatePoseCB, this, std::placeholders::_1, std::placeholders::_2));
 
         m_state_data.path.poses.clear();
         m_state_data.path.header.frame_id = m_node_config.world_frame;
@@ -419,6 +426,12 @@ public:
 
     void broadCastTF(std::shared_ptr<tf2_ros::TransformBroadcaster> broad_caster, std::string frame_id, std::string child_frame, const double &time)
     {
+        // 防止自引用变换（frame_id与child_frame_id相同）
+        if (frame_id == child_frame) {
+            RCLCPP_WARN_ONCE(this->get_logger(), "跳过自引用TF变换: %s -> %s", frame_id.c_str(), child_frame.c_str());
+            return;
+        }
+
         geometry_msgs::msg::TransformStamped transformStamped;
         transformStamped.header.frame_id = frame_id;
         transformStamped.child_frame_id = child_frame;
@@ -455,34 +468,41 @@ public:
                 // 注意：这里需要访问lidar_processor的ikd_tree，可能需要添加public方法
                 // 暂时使用一种更直接的方法，通过获取当前发布的世界坐标点云
                 
-                RCLCPP_INFO(this->get_logger(), "正在保存稠密点云地图到: %s", request->file_path.c_str());
+                RCLCPP_INFO(this->get_logger(), "开始保存全局累积地图到: %s", request->file_path.c_str());
                 
-                // 保存当前累积的地图（通过最新的世界坐标点云）
-                if (m_package.cloud) {
-                    CloudType::Ptr world_cloud = m_builder->lidar_processor()->transformCloud(
-                        m_package.cloud, 
-                        m_builder->lidar_processor()->r_wl(), 
-                        m_builder->lidar_processor()->t_wl()
-                    );
+                // 保存完整的全局累积地图（而非单帧点云）- 使用优化方法
+                CloudType::Ptr global_map = m_builder->lidar_processor()->getOptimizedGlobalMap(1.0);
+                
+                if (global_map && !global_map->empty()) {
+                    RCLCPP_INFO(this->get_logger(), "获取到全局地图，点数: %zu", global_map->size());
+                    
+                    // 点云数量合理性检查
+                    if (global_map->size() < 1000) {
+                        RCLCPP_WARN(this->get_logger(), "警告：全局地图点数较少(%zu)，可能SLAM系统运行时间不足", global_map->size());
+                    }
                     
                     // 根据文件扩展名选择保存格式
                     std::string file_path = request->file_path;
                     if (file_path.substr(file_path.find_last_of(".") + 1) == "ply") {
-                        pcl::io::savePLYFileBinary(file_path, *world_cloud);
+                        pcl::io::savePLYFileBinary(file_path, *global_map);
+                        RCLCPP_INFO(this->get_logger(), "地图已保存为PLY格式: %s", file_path.c_str());
                     } else {
-                        // 默认保存为PCD格式
+                        // 默认保存为PCD格式（保留完整信息）
                         if (file_path.substr(file_path.find_last_of(".") + 1) != "pcd") {
                             file_path += ".pcd";
                         }
-                        pcl::io::savePCDFileBinary(file_path, *world_cloud);
+                        pcl::io::savePCDFileBinary(file_path, *global_map);
+                        RCLCPP_INFO(this->get_logger(), "地图已保存为PCD格式: %s", file_path.c_str());
                     }
                     
                     response->success = true;
-                    response->message = "地图保存成功，点云数量: " + std::to_string(world_cloud->size());
-                    RCLCPP_INFO(this->get_logger(), "地图保存完成，点数: %zu", world_cloud->size());
+                    response->message = "全局地图保存成功，点云数量: " + std::to_string(global_map->size());
+                    RCLCPP_INFO(this->get_logger(), "✅ 全局地图保存完成，总点数: %zu", global_map->size());
+                    
                 } else {
                     response->success = false;
-                    response->message = "无可用的点云数据";
+                    response->message = "无法获取全局地图数据，请确保SLAM系统正在运行并已累积足够数据";
+                    RCLCPP_ERROR(this->get_logger(), "❌ 保存失败：全局地图为空，可能原因：1)SLAM未启动 2)运行时间不足 3)ikd-tree未初始化");
                 }
             } else {
                 response->success = false;
@@ -618,9 +638,9 @@ public:
             static int global_map_counter = 0;
             global_map_counter++;
             
-            // 每5帧发布一次全局地图 (之前每10帧)
+            // 每5帧发布一次全局地图 (之前每10帧) - 使用优化的获取方法
             if (global_map_counter % 5 == 0 && m_world_cloud_pub->get_subscription_count() > 0) {
-                CloudType::Ptr world_cloud = m_builder->lidar_processor()->getGlobalMap();
+                CloudType::Ptr world_cloud = m_builder->lidar_processor()->getOptimizedGlobalMap(1.0);
                 
                 if (world_cloud && !world_cloud->empty()) {
                     publishCloud(m_world_cloud_pub, world_cloud, m_node_config.world_frame, m_package.cloud_end_time);
@@ -644,6 +664,18 @@ public:
         if (++diag_counter % 5 == 0) {
             publishDiagnostics(m_diagnostics_pub, time_used, m_package.cloud_end_time);
         }
+        
+        // 定期内存优化（每30秒）
+        static int memory_optimize_counter = 0;
+        memory_optimize_counter++;
+        if (memory_optimize_counter % 3000 == 0) { // 10ms * 3000 = 30秒
+            if (m_builder && m_builder->lidar_processor()) {
+                m_builder->lidar_processor()->optimizeMapMemory();
+                size_t memory_usage_mb = m_builder->lidar_processor()->getMapMemoryUsage() / (1024 * 1024);
+                RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 30000,
+                    "地图内存优化完成，当前使用: %zu MB", memory_usage_mb);
+            }
+        }
     }
 
 private:
@@ -660,6 +692,7 @@ private:
 
     rclcpp::Service<interface::srv::SaveMaps>::SharedPtr m_save_maps_service;
     rclcpp::Service<interface::srv::SavePoses>::SharedPtr m_save_poses_service;
+    rclcpp::Service<interface::srv::UpdatePose>::SharedPtr m_update_pose_service;
 
     rclcpp::TimerBase::SharedPtr m_timer;
     StateData m_state_data;
@@ -673,6 +706,79 @@ private:
     // 内存优化：点云内存池
     CloudType::Ptr m_body_cloud_pool;
     CloudType::Ptr m_world_cloud_pool;
+
+    // PGO位姿更新回调函数
+    void updatePoseCB(const std::shared_ptr<interface::srv::UpdatePose::Request> request,
+                      std::shared_ptr<interface::srv::UpdatePose::Response> response)
+    {
+        try {
+            RCLCPP_INFO(this->get_logger(), "接收到PGO位姿更新请求，时间戳: %.6f", request->timestamp);
+            
+            // 构建优化后的位姿
+            Eigen::Vector3d optimized_position(request->x, request->y, request->z);
+            Eigen::Quaterniond optimized_rotation(request->qw, request->qx, request->qy, request->qz);
+            
+            // 添加四元数标准化
+            optimized_rotation.normalize();
+            
+            // 验证四元数有效性
+            if (optimized_rotation.norm() < 1e-8) {
+                RCLCPP_WARN(this->get_logger(), "Received invalid quaternion from PGO, ignoring update");
+                response->success = false;
+                response->message = "Invalid quaternion from PGO";
+                return;
+            }
+            
+            // 添加详细调试信息
+            RCLCPP_DEBUG(this->get_logger(), "Quaternion norm: %.9f", optimized_rotation.norm());
+            RCLCPP_DEBUG(this->get_logger(), "Original quaternion: [%.6f, %.6f, %.6f, %.6f]", 
+                        request->qw, request->qx, request->qy, request->qz);
+            RCLCPP_DEBUG(this->get_logger(), "Normalized quaternion: [%.6f, %.6f, %.6f, %.6f]", 
+                        optimized_rotation.w(), optimized_rotation.x(), 
+                        optimized_rotation.y(), optimized_rotation.z());
+            
+            // 更新IESKF状态 - 这是关键的反馈步骤
+            if (m_kf && m_builder && m_builder->status() == BuilderStatus::MAPPING) {
+                State current_state = m_kf->x();
+                
+                // 更新位置和旋转
+                current_state.t_wi = optimized_position;
+                current_state.r_wi = optimized_rotation.toRotationMatrix();
+                
+                // 验证旋转矩阵正交性
+                if (!isValidRotationMatrix(current_state.r_wi)) {
+                    RCLCPP_WARN(this->get_logger(), "PGO rotation matrix not orthogonal, enforcing orthogonality");
+                    current_state.r_wi = enforceOrthogonality(current_state.r_wi);
+                }
+                
+                // 添加旋转矩阵调试信息
+                RCLCPP_DEBUG(this->get_logger(), "Rotation matrix determinant: %.9f", 
+                            current_state.r_wi.determinant());
+                RCLCPP_DEBUG(this->get_logger(), "Orthogonality check: %.9f", 
+                            (current_state.r_wi * current_state.r_wi.transpose() - 
+                             Eigen::Matrix3d::Identity()).norm());
+                
+                // 将优化后的状态反馈给FAST-LIO2（直接修改状态）
+                m_kf->x() = current_state;
+                
+                RCLCPP_INFO(this->get_logger(), 
+                    "成功更新FAST-LIO2状态 - 位置: [%.3f, %.3f, %.3f]", 
+                    optimized_position.x(), optimized_position.y(), optimized_position.z());
+                
+                response->success = true;
+                response->message = "位姿更新成功";
+            } else {
+                RCLCPP_WARN(this->get_logger(), "SLAM系统未就绪，无法更新位姿");
+                response->success = false;
+                response->message = "SLAM系统未就绪";
+            }
+            
+        } catch (const std::exception& e) {
+            RCLCPP_ERROR(this->get_logger(), "位姿更新失败: %s", e.what());
+            response->success = false;
+            response->message = std::string("更新失败: ") + e.what();
+        }
+    }
 };
 
 int main(int argc, char **argv)

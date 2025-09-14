@@ -4,6 +4,13 @@ LidarProcessor::LidarProcessor(Config &config, std::shared_ptr<IESKF> kf) : m_co
 {
     m_ikdtree = std::make_shared<KD_TREE<PointType>>();
     m_ikdtree->set_downsample_param(m_config.map_resolution);
+    
+    // 初始化优化的地图管理结构
+    m_global_ikdtree = std::make_shared<KD_TREE<PointType>>();
+    m_global_ikdtree->set_downsample_param(m_config.map_resolution * 2.0); // 全局地图使用2倍分辨率
+    m_cached_global_map.reset(new CloudType);
+    m_cache_timestamp = std::chrono::steady_clock::now() - std::chrono::milliseconds(CACHE_VALID_MS + 1);
+    
     m_cloud_down_lidar.reset(new CloudType);
     m_cloud_down_world.reset(new CloudType(10000, 1));
     m_norm_vec.reset(new CloudType(10000, 1));
@@ -299,4 +306,214 @@ CloudType::Ptr LidarProcessor::getGlobalMap()
     global_map->is_dense = true;
     
     return global_map;
+}
+
+// 优化的全局地图获取方法 - 使用缓存和分层策略
+CloudType::Ptr LidarProcessor::getOptimizedGlobalMap(float resolution_scale)
+{
+    // 检查缓存是否有效
+    if (isCacheValid() && resolution_scale == 1.0) {
+        return m_cached_global_map;
+    }
+    
+    CloudType::Ptr optimized_map(new CloudType);
+    
+    // 检查ikd-tree状态
+    if (!m_ikdtree || !m_ikdtree->Root_Node) {
+        return optimized_map;
+    }
+    
+    // 如果树的大小发生显著变化或缓存失效，重新构建
+    size_t current_tree_size = m_ikdtree->size();
+    bool need_rebuild = (current_tree_size - m_last_tree_size) > (m_last_tree_size * 0.1) || !isCacheValid();
+    
+    if (need_rebuild && resolution_scale == 1.0) {
+        updateGlobalMapCache();
+        return m_cached_global_map;
+    }
+    
+    // 对于非标准分辨率请求，实时生成
+    typename KD_TREE<PointType>::PointVector all_points;
+    m_ikdtree->flatten(m_ikdtree->Root_Node, all_points, delete_point_storage_set::NOT_RECORD);
+    
+    // 预分配内存
+    optimized_map->points.reserve(all_points.size() / (resolution_scale * resolution_scale));
+    
+    // 智能采样策略 - 根据距离和密度动态调整
+    const State &state = m_kf->x();
+    Eigen::Vector3d current_pos = state.t_wi + state.r_wi * state.t_il;
+    
+    float adaptive_threshold = 0.1 * resolution_scale;
+    size_t skip_counter = 0;
+    size_t skip_ratio = static_cast<size_t>(resolution_scale * resolution_scale);
+    
+    for (const auto& point : all_points) {
+        // 智能质量滤波
+        if (!std::isfinite(point.x) || !std::isfinite(point.y) || !std::isfinite(point.z)) {
+            continue;
+        }
+        
+        float distance_to_sensor = sqrt(point.x*point.x + point.y*point.y + point.z*point.z);
+        float distance_to_robot = sqrt(pow(point.x - current_pos.x(), 2) + 
+                                      pow(point.y - current_pos.y(), 2) + 
+                                      pow(point.z - current_pos.z(), 2));
+        
+        // 距离滤波 + 动态采样
+        if (distance_to_sensor > 0.1 && distance_to_sensor < 80.0) {
+            // 根据距离机器人的远近调整采样率
+            size_t dynamic_skip = distance_to_robot > 50.0 ? skip_ratio * 2 : skip_ratio;
+            
+            if (skip_counter++ % dynamic_skip == 0) {
+                optimized_map->points.push_back(point);
+            }
+        }
+    }
+    
+    optimized_map->width = optimized_map->points.size();
+    optimized_map->height = 1;
+    optimized_map->is_dense = true;
+    
+    return optimized_map;
+}
+
+// 更新全局地图缓存
+void LidarProcessor::updateGlobalMapCache()
+{
+    if (!m_ikdtree || !m_ikdtree->Root_Node) {
+        return;
+    }
+    
+    typename KD_TREE<PointType>::PointVector all_points;
+    m_ikdtree->flatten(m_ikdtree->Root_Node, all_points, delete_point_storage_set::NOT_RECORD);
+    
+    // 更新缓存
+    m_cached_global_map->clear();
+    m_cached_global_map->points.reserve(all_points.size());
+    
+    // 应用质量滤波和智能采样
+    for (const auto& point : all_points) {
+        if (std::isfinite(point.x) && std::isfinite(point.y) && std::isfinite(point.z)) {
+            float distance = sqrt(point.x*point.x + point.y*point.y + point.z*point.z);
+            if (distance > 0.1 && distance < 80.0) {
+                m_cached_global_map->points.push_back(point);
+            }
+        }
+    }
+    
+    m_cached_global_map->width = m_cached_global_map->points.size();
+    m_cached_global_map->height = 1;
+    m_cached_global_map->is_dense = true;
+    
+    // 更新缓存时间戳和树大小记录
+    m_cache_timestamp = std::chrono::steady_clock::now();
+    m_last_tree_size = m_ikdtree->size();
+}
+
+// 检查缓存是否有效
+bool LidarProcessor::isCacheValid() const
+{
+    auto now = std::chrono::steady_clock::now();
+    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(now - m_cache_timestamp);
+    return duration.count() < CACHE_VALID_MS && !m_cached_global_map->empty();
+}
+
+// 优化地图内存使用
+void LidarProcessor::optimizeMapMemory()
+{
+    if (!m_ikdtree || !m_ikdtree->Root_Node) {
+        return;
+    }
+    
+    // 获取当前机器人位置
+    const State &state = m_kf->x();
+    Eigen::Vector3d robot_pos = state.t_wi + state.r_wi * state.t_il;
+    
+    // 定义内存清理区域：距离机器人超过100米的旧数据
+    BoxPointType cleanup_box;
+    float cleanup_radius = 100.0;
+    
+    // 创建清理区域 (示例：清理远离机器人的区域)
+    std::vector<BoxPointType> boxes_to_remove;
+    
+    // 这里可以根据具体需求添加更复杂的清理策略
+    // 比如基于时间戳、访问频率等
+    
+    // 执行清理
+    if (!boxes_to_remove.empty()) {
+        m_ikdtree->Delete_Point_Boxes(boxes_to_remove);
+        
+        // 清理后重建缓存
+        m_cache_timestamp = std::chrono::steady_clock::now() - std::chrono::milliseconds(CACHE_VALID_MS + 1);
+    }
+}
+
+// 获取地图内存使用情况
+size_t LidarProcessor::getMapMemoryUsage() const
+{
+    size_t memory_usage = 0;
+    
+    if (m_ikdtree) {
+        memory_usage += m_ikdtree->size() * sizeof(PointType);
+    }
+    
+    if (m_cached_global_map) {
+        memory_usage += m_cached_global_map->size() * sizeof(PointType);
+    }
+    
+    return memory_usage;
+}
+
+// 点云降采样方法
+CloudType::Ptr LidarProcessor::downsampleMap(CloudType::Ptr input, float leaf_size) const
+{
+    if (!input || input->empty()) {
+        return CloudType::Ptr(new CloudType);
+    }
+    
+    // 安全的体素化：检查体素尺寸和点云范围
+    Eigen::Vector4f min_pt, max_pt;
+    
+    // 手动计算点云边界
+    if (input->points.empty()) {
+        return CloudType::Ptr(new CloudType);
+    }
+    
+    min_pt[0] = max_pt[0] = input->points[0].x;
+    min_pt[1] = max_pt[1] = input->points[0].y;
+    min_pt[2] = max_pt[2] = input->points[0].z;
+    
+    for (const auto& point : input->points) {
+        if (std::isfinite(point.x) && std::isfinite(point.y) && std::isfinite(point.z)) {
+            min_pt[0] = std::min(min_pt[0], point.x);
+            max_pt[0] = std::max(max_pt[0], point.x);
+            min_pt[1] = std::min(min_pt[1], point.y);
+            max_pt[1] = std::max(max_pt[1], point.y);
+            min_pt[2] = std::min(min_pt[2], point.z);
+            max_pt[2] = std::max(max_pt[2], point.z);
+        }
+    }
+    
+    double range_x = max_pt[0] - min_pt[0];
+    double range_y = max_pt[1] - min_pt[1];
+    double range_z = max_pt[2] - min_pt[2];
+    double max_range = std::max({range_x, range_y, range_z});
+    
+    // 防止整数溢出：确保体素数量不超过安全阈值
+    double safe_leaf_size = leaf_size;
+    const int32_t MAX_VOXELS_PER_DIM = 10000;  // 安全阈值
+    
+    if (max_range / safe_leaf_size > MAX_VOXELS_PER_DIM) {
+        safe_leaf_size = max_range / MAX_VOXELS_PER_DIM;
+        std::cout << "[WARN] Voxel size too small, adjusted from " 
+                  << leaf_size << " to " << safe_leaf_size << std::endl;
+    }
+    
+    pcl::VoxelGrid<PointType> voxel_grid;
+    voxel_grid.setInputCloud(input);
+    voxel_grid.setLeafSize(safe_leaf_size, safe_leaf_size, safe_leaf_size);
+    
+    CloudType::Ptr downsampled(new CloudType);
+    voxel_grid.filter(*downsampled);
+    
+    return downsampled;
 }

@@ -1,6 +1,7 @@
 #include <queue>
 #include <mutex>
 #include <filesystem>
+#include <pcl/io/pcd_io.h>
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/point_cloud2.hpp>
 #include <nav_msgs/msg/odometry.hpp>
@@ -16,6 +17,7 @@
 #include "localizers/icp_localizer.h"
 #include "interface/srv/relocalize.hpp"
 #include "interface/srv/is_valid.hpp"
+#include "interface/srv/update_pose.hpp"
 #include <yaml-cpp/yaml.h>
 
 using namespace std::chrono_literals;
@@ -70,6 +72,21 @@ public:
         m_reloc_check_srv = this->create_service<interface::srv::IsValid>("relocalize_check", std::bind(&LocalizerNode::relocCheckCB, this, std::placeholders::_1, std::placeholders::_2));
 
         m_map_cloud_pub = this->create_publisher<sensor_msgs::msg::PointCloud2>("map_cloud", 10);
+
+        // Create client for FAST-LIO2 pose update feedback
+        m_update_pose_client = this->create_client<interface::srv::UpdatePose>("/fastlio2/update_pose");
+
+        // 添加自动地图加载功能
+        m_auto_load_map_service = this->create_service<interface::srv::IsValid>(
+            "auto_load_map", 
+            std::bind(&LocalizerNode::autoLoadMapCB, this, std::placeholders::_1, std::placeholders::_2));
+        
+        // 启动时自动尝试加载地图
+        if (tryAutoLoadMap()) {
+            RCLCPP_INFO(this->get_logger(), "✅ 自动地图加载成功");
+        } else {
+            RCLCPP_WARN(this->get_logger(), "⚠️ 自动地图加载失败，使用服务模式");
+        }
 
         m_timer = this->create_wall_timer(10ms, std::bind(&LocalizerNode::timerCB, this));
     }
@@ -157,6 +174,9 @@ public:
                 std::lock_guard<std::mutex>(m_state.service_mutex);
                 m_state.localize_success = true;
                 m_state.service_received = false;
+                
+                // Send relocalization feedback to FAST-LIO2
+                sendRelocalizationFeedback(map_body_r, map_body_t, current_time);
             }
         }
         sendBroadCastTF(current_time);
@@ -187,6 +207,13 @@ public:
 
     void sendBroadCastTF(builtin_interfaces::msg::Time &time)
     {
+        // 防止自引用变换（frame_id与child_frame_id相同）
+        if (m_config.map_frame == m_config.local_frame) {
+            RCLCPP_WARN_ONCE(this->get_logger(), "LOCALIZER跳过自引用TF变换: %s -> %s", 
+                             m_config.map_frame.c_str(), m_config.local_frame.c_str());
+            return;
+        }
+
         geometry_msgs::msg::TransformStamped transformStamped;
         transformStamped.header.frame_id = m_config.map_frame;
         transformStamped.child_frame_id = m_config.local_frame;
@@ -267,6 +294,45 @@ public:
         m_map_cloud_pub->publish(map_cloud_msg);
     }
 
+    void sendRelocalizationFeedback(const M3D& map_body_r, const V3D& map_body_t, const builtin_interfaces::msg::Time& timestamp)
+    {
+        if (!m_update_pose_client->wait_for_service(std::chrono::milliseconds(100)))
+        {
+            RCLCPP_WARN(this->get_logger(), "FAST-LIO2 update_pose service not available");
+            return;
+        }
+
+        // Convert rotation matrix to quaternion
+        Eigen::Quaterniond quat(map_body_r);
+
+        auto request = std::make_shared<interface::srv::UpdatePose::Request>();
+        request->timestamp = rclcpp::Time(timestamp).seconds();
+        request->x = map_body_t.x();
+        request->y = map_body_t.y();
+        request->z = map_body_t.z();
+        request->qw = quat.w();
+        request->qx = quat.x();
+        request->qy = quat.y();
+        request->qz = quat.z();
+
+        // Send async request with callback
+        auto result_future = m_update_pose_client->async_send_request(
+            request,
+            [this](rclcpp::Client<interface::srv::UpdatePose>::SharedFuture future) {
+                try {
+                    auto response = future.get();
+                    if (response->success) {
+                        RCLCPP_INFO(this->get_logger(), "重定位反馈发送成功: %s", response->message.c_str());
+                    } else {
+                        RCLCPP_WARN(this->get_logger(), "重定位反馈失败: %s", response->message.c_str());
+                    }
+                } catch (const std::exception& e) {
+                    RCLCPP_ERROR(this->get_logger(), "重定位反馈异常: %s", e.what());
+                }
+            }
+        );
+    }
+
 private:
     NodeConfig m_config;
     NodeState m_state;
@@ -281,6 +347,59 @@ private:
     rclcpp::Service<interface::srv::Relocalize>::SharedPtr m_reloc_srv;
     rclcpp::Service<interface::srv::IsValid>::SharedPtr m_reloc_check_srv;
     rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr m_map_cloud_pub;
+    rclcpp::Client<interface::srv::UpdatePose>::SharedPtr m_update_pose_client;
+    rclcpp::Service<interface::srv::IsValid>::SharedPtr m_auto_load_map_service;
+    
+    // 自动地图加载功能
+    bool tryAutoLoadMap()
+    {
+        // 尝试加载默认地图路径
+        std::vector<std::string> potential_map_paths = {
+            "./saved_maps/optimized_map.pcd",
+            "./saved_maps/map.pcd", 
+            "./saved_maps/world_cloud.pcd",
+            "../saved_maps/optimized_map.pcd",
+            "../saved_maps/map.pcd"
+        };
+        
+        for (const auto& path : potential_map_paths) {
+            if (std::filesystem::exists(path)) {
+                RCLCPP_INFO(this->get_logger(), "🗺️ 尝试加载地图: %s", path.c_str());
+                
+                CloudType::Ptr map_cloud(new CloudType);
+                if (pcl::io::loadPCDFile(path, *map_cloud) == 0 && !map_cloud->empty()) {
+                    m_localizer->loadMap(path);
+                    
+                    // 发布地图点云供可视化
+                    sensor_msgs::msg::PointCloud2 map_msg;
+                    pcl::toROSMsg(*map_cloud, map_msg);
+                    map_msg.header.frame_id = m_config.map_frame;
+                    map_msg.header.stamp = this->now();
+                    m_map_cloud_pub->publish(map_msg);
+                    
+                    RCLCPP_INFO(this->get_logger(), "✅ 成功加载地图: %s (%zu点)", 
+                               path.c_str(), map_cloud->size());
+                    return true;
+                } else {
+                    RCLCPP_WARN(this->get_logger(), "❌ 地图加载失败: %s", path.c_str());
+                }
+            }
+        }
+        
+        return false;
+    }
+    
+    void autoLoadMapCB(const std::shared_ptr<interface::srv::IsValid::Request> request,
+                       std::shared_ptr<interface::srv::IsValid::Response> response)
+    {
+        (void)request; // 避免未使用参数警告
+        response->valid = tryAutoLoadMap();
+        if (response->valid) {
+            RCLCPP_INFO(this->get_logger(), "📋 服务请求：地图重新加载成功");
+        } else {
+            RCLCPP_WARN(this->get_logger(), "📋 服务请求：地图加载失败");
+        }
+    }
 };
 int main(int argc, char **argv)
 {

@@ -13,6 +13,10 @@ using M21X12D = Eigen::Matrix<double, 21, 12>;
 M3D Jr(const V3D &inp);
 M3D JrInv(const V3D &inp);
 
+// 旋转矩阵验证和正交化工具函数
+bool isValidRotationMatrix(const Eigen::Matrix3d& R, double tolerance = 1e-6);
+Eigen::Matrix3d enforceOrthogonality(const Eigen::Matrix3d& R);
+
 struct SharedState
 {
 public:

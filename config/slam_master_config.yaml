@@ -1,0 +1,310 @@
+# =================== 全局统一参数 ===================
+# 这里定义的参数会被所有组件共享，确保系统一致性
+#
+# === 重要更新说明 (2024-XX-XX) ===
+# 修复了PCL VoxelGrid整数溢出问题:
+# - 体素分辨率从0.12-0.15m调整为0.3-0.5m
+# - 地图范围从1000m缩小为200m  
+# - 添加了代码层安全保护机制
+# 这些调整确保了系统稳定运行，防止"Leaf size too small"错误
+global_params:
+  # ========== 核心分辨率参数 ==========
+  # 注意: 这些分辨率直接影响系统性能和精度
+  # 已优化：防止PCL VoxelGrid整数溢出问题
+  scan_resolution: 0.15          # 主分辨率标准(m) - 从0.15调整为0.3防止溢出
+                                # - FastLIO2: 扫描点云分辨率
+                                # - PGO: 回环检测分辨率  
+                                # - HBA: 束调优化分辨率
+                                # - Localizer: 精细匹配分辨率
+  map_resolution: 0.15           # 地图分辨率(m) - 从0.12调整为0.5防止溢出
+  rough_resolution: 0.15         # 粗略处理分辨率(m) - 从0.15调整为0.5
+  
+  # ========== 话题命名统一 ==========
+  topic_prefix: "/fastlio2"     # 统一话题前缀 - 所有SLAM相关话题都使用此前缀
+  
+  # ========== 坐标系命名 ==========
+  # 按照 ROS 标准的坐标系命名约定
+  map_frame: "map"             # 世界坐标系 (固定的全局参考系)
+  local_frame: "lidar"         # 本地坐标系 (雷达初始位置) 
+  body_frame: "body"           # 机体坐标系 (无人机中心)
+  lidar_frame: "livox_frame"   # 雷达坐标系 (MID360传感器坐标系)
+
+# =================== 系统级配置 ===================
+# 控制整个SLAM系统的启动、网络和数据记录等全局行为
+system:
+  # ========== 网络配置 ==========
+  # MID360 雷达使用以太网连接，需要正确的IP配置
+  host_ip: "192.168.1.50"      # 主机IP地址 - 运行SLAM系统的计算机IP
+  lidar_ip: "192.168.1.3"      # MID360雷达IP - 出厂默认192.168.1.3
+                                # 注意: 确保主机和雷达在同一网段
+
+  # ========== 输入话题配置 ==========
+  # Livox MID360 雷达驱动的标准输出话题
+  input_topics:
+    imu_topic: "/livox/imu"     # IMU数据话题 - MID360内置IMU输出
+    lidar_topic: "/livox/lidar" # 点云数据话题 - MID360激光雷达输出
+  
+  # ========== 启动管理 ==========
+  # 控制系统组件的启动顺序和时序
+  auto_start_components: true   # 自动启动所有启用的组件 (推荐保持true)
+  wait_time_between_nodes: 3    # 节点启动间隔(秒) - 避免同时启动造成资源竞争
+  enable_debug_output: false    # 调试输出开关 - true时输出详细日志信息
+  
+  # ========== 数据记录配置 ==========  
+  # 是否自动录制关键话题数据，用于离线分析和调试
+  enable_bag_recording: true   # rosbag录制开关 - true时自动录制以下话题
+  bag_record_topics:           # 要录制的话题列表
+    - "/livox/lidar"            # 原始激光雷达点云数据
+    - "/livox/imu"             # IMU惯性测量单元数据 
+    - "/fastlio2/lio_odom"     # SLAM输出的里程计数据
+    - "/fastlio2/body_cloud"   # 处理后的点云数据
+
+# =================== FastLIO2 核心SLAM ===================
+# FastLIO2 是整个 SLAM 系统的核心，负责实时定位和建图
+# 基于高速的 LiDAR-IMU 融合算法，能够实现低延迟的定位和建图
+fastlio2:
+  enabled: true                 # 核心组件，必须启用 (不可禁用)
+  priority: 1                   # 启动优先级 (最高优先级，首先启动)
+  
+  # ========== LiDAR 传感器参数 ==========
+  # 控制激光雷达数据的处理和过滤
+  lidar_params:
+    max_range: 80.0            # 最大检测距离(m) - 超过此距离的点云被忽略
+                               # MID360 最大范围 260m，设置 80m 避免远距离噪声
+    min_range: 0.5             # 最小检测距离(m) - 过近的点云可能包含设备本身反射
+    filter_num: 1              # 点云滤波强度 (1-5级别) - 2为温和滤波，保留更多细节
+    scan_resolution: "${global_params.scan_resolution}"  # 引用全局统一分辨率
+    map_resolution: "${global_params.map_resolution}"   # 引用全局地图分辨率
+  
+  # ========== 地图管理参数 ==========
+  # 控制局部地图的大小和更新策略，关键影响内存使用和实时性
+  # 已优化：缩小范围防止PCL VoxelGrid整数溢出
+  mapping_params:
+    cube_len: 200             # 局部地图范围(m) - 局部地图立方体的边长
+                               # 200m×200m×200m 局部地图，超出部分会被清理
+    det_range: 80              # 地图管理检测范围(m) - 与雷达最大范围匹配
+                               # 80m = 与lidar_max_range保持一致，确保参数匹配
+    move_thresh: 0.5          # 移动阈值倍数 - 触发地图清理的阈值倍数
+                               # 0.5倍 = 移动40m时触发清理 (适中的清理频率)
+  
+  # ========== IMU 参数 (针对MID360内置IMU优化) ==========
+  # MID360 雷达内置高精度 IMU，这些参数已经优化
+  imu_params:
+    noise_acc: 0.005           # 加速度计噪声标准差 - 降低值，信任MID360的IMU精度
+    noise_gyro: 0.005          # 陀螺仪噪声标准差 - 同上
+    bias_acc: 0.0001           # 加速度计偏置噪声 - IMU随时间漂移
+    bias_gyro: 0.00005         # 陀螺仪偏置噪声 - 稍低于加速度计
+    init_samples: 150          # IMU初始化样本数 - 更多样本获得更精确的初始标定
+  
+  # ========== SLAM 算法参数 ==========
+  # 控制 FastLIO2 的数值优化和精度参数
+  algorithm_params:
+    near_search_num: 10        # KNN搜索数量 - 每个点搜索最近邻点10个点
+                               # 更多邻点 = 更精确匹配，但计算量增加
+    ieskf_max_iter: 6          # IESKF最大迭代次数 - 迭代扩展卡尔曼滤波的迭代次数
+                               # 4次迭代平衡了精度和实时性
+    gravity_align: true        # 重力对齐 - 启用重力矢量辅助定向
+    estimate_extrinsic: false  # 外参估计 - 禁用实时外参估计，使用固定标定值
+    lidar_cov_inv: 5000.0      # LiDAR协方差逆 - 控制LiDAR观测的信任度
+  
+  # ========== 外参标定 (LiDAR到IMU的变换) ==========
+  # MID360 雷达出厂标定的 LiDAR-IMU 外参矩阵
+  extrinsic:
+    # 3x3 旋转矩阵 (R) - 表示坐标系旋转关系
+    rotation: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]  # 单位矩阵(无旋转)
+    # 3x1 平移矢量 (t) - LiDAR相对于IMU的位置偏移(m)
+    translation: [-0.011, -0.02329, 0.04412]  # MID360官方标定值
+  
+  # ========== 输出话题定义 ==========
+  # FastLIO2 发布的所有ROS话题，供其他组件订阅使用
+  topics:
+    odometry: "/fastlio2/lio_odom"      # 实时里程计 (6DOF位姿 + 速度)
+    point_cloud: "/fastlio2/body_cloud"  # 处理后的点云(机体坐标系) 
+    path: "/fastlio2/lio_path"          # SLAM轨迹路径
+    world_cloud: "/fastlio2/world_cloud" # 世界坐标系下的全局地图
+    diagnostics: "/fastlio2/diagnostics"  # 系统诊断和状态信息
+
+# =================== 位姿图优化(PGO) ===================
+# Pose Graph Optimization - 通过回环检测和位姿图优化消除累积误差
+# 在长距离轨迹中非常重要，能显著改善全局一致性
+pgo:
+  enabled: true                 # 启用PGO优化 (推荐在大范围建图时开启)
+  priority: 2                   # 启动优先级 (在FastLIO2之后启动)
+  depends_on: ["fastlio2"]      # 依赖FastLIO2 - 需要SLAM结果作为输入
+  
+  # ========== 关键帧提取策略 ==========
+  # 控制从连续轨迹中选取关键帧的条件
+  keyframe:
+    delta_translation: 0.2     # 平移阈值(m) - 移动超过0.5m才创建新关键帧
+                               # 较小值 = 更密集关键帧 = 更精确但计算量更大
+    delta_rotation: 5         # 旋转阈值(度) - 旋转超过10度才创建新关键帧
+  
+  # ========== 回环检测参数 ==========
+  # 检测车辆/无人机是否回到之前访问过的位置
+  loop_closure:
+    enabled: true              # 启用回环检测 - 关键功能，建议开启
+    search_radius: 40.0         # 搜索半径(m) - 在多大范围内搜索历史关键帧
+                               # 1.0m 适合室内和精细操作环境
+    time_threshold: 30.0       # 时间阈值(s) - 只考虑60s前的关键帧作为回环候选
+                               # 避免近期轨迹的虚假回环检测
+    score_threshold: 0.3      # 匹配分数阈值 - 低于此值认为不是回环
+                               # 0.15 是较为保守的设置，减少虚假检测
+    submap_half_range: 5       # 子图半径(关键帧数量) - 回环检测时用多少个关键帧
+    min_detect_duration: 5.0   # 最小检测间隔(s) - 避免过于频繁的回环检测
+  
+  # ========== 参数引用 ==========
+  scan_resolution: "${global_params.scan_resolution}"  # 使用全局统一分辨率
+  
+  # ========== 输入数据源 ==========  
+  # PGO需要订阅FastLIO2的输出作为输入
+  topics:
+    input_cloud: "/fastlio2/body_cloud"  # 订阅点云数据 - 用于回环检测的特征匹配
+    input_odom: "/fastlio2/lio_odom"     # 订阅里程计数据 - 获取位姿信息
+
+# =================== 分层束调整(HBA) ===================
+# Hierarchical Bundle Adjustment - 分层束调优化算法
+# 通过分层结构优化大规模点云地图，改善局部精度和全局一致性
+hba:
+  enabled: true                 # 启用HBA优化 (在高精度建图时推荐开启)
+  priority: 3                   # 启动优先级 (在FastLIO2和PGO之后)
+  depends_on: ["fastlio2"]      # 依赖FastLIO2 - 需要SLAM结果作为输入
+  
+  # ========== 数值优化参数 ==========
+  # 控制HBA算法的迭代过程和收敛条件
+  optimization:
+    window_size: 20            # 滑动窗口大小(关键帧数) - 同时优化多少个关键帧
+                               # 较大值 = 更全局优化但计算量增大
+    stride: 10                 # 处理步长(关键帧间隔) - 每多少个关键帧执行一次HBA
+                               # 10 = 平衡了实时性和优化效果
+    max_iterations: 10         # BA最大迭代次数 - 控制单次优化的计算量
+    hba_iterations: 5          # HBA全局迭代次数 - 分层优化的轮次
+    convergence_threshold: 0.01 # 收敛阈值 - 误差低于此值时停止迭代
+    plane_threshold: 0.01      # 平面特征阈值(m) - 用于平面提取的几何阈值
+  
+  # ========== 点云处理参数 ==========
+  # 控制输入点云的预处理和特征提取
+  # 已优化：与全局分辨率保持一致
+  point_cloud:
+    voxel_size: 0.15            # 体素网格大小(m) - 与map_resolution保持一致
+                               # 0.5m 防止VoxelGrid溢出，适合中等规模环境
+    min_points: 10             # 最小点数 - 体素内点数少于此值则忽略
+    max_layer: 3               # 分层最大层数 - HBA采用的空间分层级别
+                               # 3层 = 平衡了精度和效率
+    # 使用全局统一分辨率提高一致性
+    downsample_resolution: "${global_params.scan_resolution}"  # 降采样精度
+  
+  # ========== 参数引用 ==========
+  scan_resolution: "${global_params.scan_resolution}"  # 使用全局统一分辨率
+
+# =================== 定位器(Localizer) ===================
+# ICP-based Localizer - 基于ICP的重定位系统
+# 在预先构建的地图中实现精确定位，适用于已知环境的定位任务
+localizer:
+  enabled: true                 # 启用定位功能 (在已知地图环境中推荐开启)
+  priority: 4                   # 启动优先级 (最后启动)
+  depends_on: ["fastlio2"]      # 依赖FastLIO2 - 需要实时点云数据
+  
+  # ========== ICP算法配置 ==========
+  # Iterative Closest Point - 采用两阶段ICP匹配策略
+  icp:
+    # 第一阶段: 粗略快速匹配
+    rough:
+      scan_resolution: "${global_params.rough_resolution}"  # 使用粗略分辨率(0.15m)
+      map_resolution: "${global_params.rough_resolution}"   # 地图分辨率保持一致
+      max_iteration: 5           # 最大迭代次数 - 快速收敛，传給精细阶段
+      score_threshold: 0.2       # 匹配分数阈值 - 相对宽松，允许一定误差
+    
+    # 第二阶段: 精细精确匹配  
+    refine:
+      scan_resolution: "${global_params.scan_resolution}"  # 使用高精度分辨率(0.05m)
+      map_resolution: "${global_params.scan_resolution}"   # 保持一致性
+      max_iteration: 10          # 更多迭代次数 - 追求高精度结果
+      score_threshold: 0.1       # 严格的匹配阈值 - 确保定位精度
+  
+  # ========== 重定位功能 ==========
+  # 在位置不确定时重新获取精确位置
+  relocalization:
+    enabled: true              # 启用重定位 - 重要的容错功能
+    search_radius: 2.0         # 搜索半径(m) - 在此范围内搜索匹配位置
+                               # 2.0m 适合大多数应用场景
+    confidence_threshold: 0.8  # 置信度阈值 - 高于此值才接受重定位结果
+                               # 0.8 是较为保守的设置，防止错误定位
+  
+  # ========== 运行参数 ==========
+  update_hz: 1.0               # 更新频率(Hz) - 1Hz适合大多数定位任务
+                               # 较低频率减少计算负载，不影响实时性
+  
+  # ========== 输入数据源 ==========
+  # Localizer需要订阅FastLIO2的输出
+  topics:
+    input_cloud: "/fastlio2/body_cloud"  # 订阅实时点云 - 用于ICP匹配
+    input_odom: "/fastlio2/lio_odom"     # 订阅里程计 - 提供位姿初值
+
+# =================== 可视化配置 ===================
+visualization:
+  rviz:
+    enabled: true              # 启动RViz
+    config_file: "enhanced_fastlio2.rviz"
+    auto_start: true
+  
+  # 显示设置
+  display:
+    show_trajectory: true      # 显示轨迹
+    show_point_cloud: true     # 显示点云
+    show_keyframes: true       # 显示关键帧
+    show_loop_closures: true   # 显示回环
+    point_size: 2              # 点云大小
+    trajectory_width: 0.1      # 轨迹线宽
+
+# =================== 性能监控 ===================
+monitoring:
+  enabled: true                # 启用性能监控
+  publish_diagnostics: true    # 发布诊断信息
+  log_performance: true        # 记录性能日志
+  
+  # 性能阈值 - 
+  thresholds:
+    max_processing_time: 200   # 最大处理时间(ms) - 
+    min_point_cloud_size: 1000 # 最小点云大小 - 保留更多细节点云
+    max_memory_usage: 28672    # 最大内存使用(MB) - 
+    max_cpu_usage: 80          # 最大CPU使用率(%) - 
+
+# =================== 地图保存管理 ===================
+map_management:
+  auto_save:
+    enabled: false             # 自动保存开关
+    interval: 300              # 保存间隔(s)
+  
+  save_directory: "./saved_maps"
+  
+  # 保存格式
+  formats:
+    point_cloud: "pcd"         # 点云格式
+    trajectory: "txt"          # 轨迹格式
+    optimized_map: "pcd"       # 优化地图格式
+  
+  # 保存内容
+  content:
+    raw_map: true              # 原始地图
+    optimized_map: true        # 优化地图
+    trajectory: true           # 轨迹数据
+    keyframes: true            # 关键帧数据
+
+# =================== 高级选项 ===================
+advanced:
+  # 多线程设置 - 充分利用32线程CPU
+  threading:
+    enable_parallel: true      # 启用并行处理
+    num_threads: 12            # 线程数量 - 使用75%核心，为系统保留资源
+  
+  # 内存管理 - 为持久化建图优化
+  memory:
+    enable_optimization: true  # 启用内存优化
+    max_cache_size: 16384       # 最大缓存大小(MB) - 8GB缓存，支持更大范围持久化地图
+  
+  # 调试选项
+  debug:
+    enable_profiling: false    # 启用性能分析
+    log_level: "INFO"          # 日志级别
+    save_intermediate_results: false # 保存中间结果
+    

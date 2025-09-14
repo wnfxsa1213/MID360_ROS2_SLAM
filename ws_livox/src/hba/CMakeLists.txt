@@ -21,6 +21,8 @@ find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(sensor_msgs REQUIRED)
+find_package(nav_msgs REQUIRED)
+find_package(geometry_msgs REQUIRED)
 find_package(interface REQUIRED)
 find_package(pcl_conversions REQUIRED)
 
@@ -47,7 +49,7 @@ set(SRC_LIST src/hba/commons.cpp
              src/hba/hba.cpp)
 
 add_executable(hba_node src/hba_node.cpp ${SRC_LIST})
-ament_target_dependencies(hba_node rclcpp std_msgs sensor_msgs interface pcl_conversions GTSAM Sophus)
+ament_target_dependencies(hba_node rclcpp std_msgs sensor_msgs nav_msgs geometry_msgs interface pcl_conversions GTSAM Sophus)
 target_link_libraries(hba_node ${PCL_LIBRARIES} gtsam yaml-cpp)
 
 install(TARGETS hba_node DESTINATION lib/${PROJECT_NAME})

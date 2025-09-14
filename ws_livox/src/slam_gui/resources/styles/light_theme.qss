@@ -1,0 +1,54 @@
+/* SLAM GUI 浅色主题样式表 */
+
+QMainWindow {
+    background-color: #f5f5f5;
+    color: #333333;
+}
+
+QWidget {
+    background-color: #f5f5f5;
+    color: #333333;
+}
+
+QPushButton {
+    background-color: #e0e0e0;
+    color: #333333;
+    border: 1px solid #cccccc;
+    padding: 6px 12px;
+    border-radius: 3px;
+    font-weight: bold;
+}
+
+QPushButton:hover {
+    background-color: #d0d0d0;
+}
+
+QPushButton:pressed {
+    background-color: #c0c0c0;
+}
+
+QGroupBox {
+    font-weight: bold;
+    border: 2px solid #cccccc;
+    border-radius: 5px;
+    margin: 3px;
+    padding-top: 10px;
+    color: #333333;
+}
+
+QTabWidget::pane {
+    border: 1px solid #cccccc;
+    background-color: #ffffff;
+}
+
+QTabBar::tab {
+    background-color: #e0e0e0;
+    color: #333333;
+    padding: 6px 12px;
+    border: 1px solid #cccccc;
+    border-bottom: none;
+}
+
+QTabBar::tab:selected {
+    background-color: #ffffff;
+}

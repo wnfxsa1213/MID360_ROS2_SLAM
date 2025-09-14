@@ -1,257 +1,286 @@
-# MID360_ROS2_SLAM
+# MID360 激光雷达实时SLAM建图系统
 
-<div align="center">
+## 🚀 项目简介
 
-[![ROS2](https://img.shields.io/badge/ROS2-Humble-blue.svg)](https://docs.ros.org/en/humble/)
-[![Ubuntu](https://img.shields.io/badge/Ubuntu-22.04-orange.svg)](https://ubuntu.com/)
-[![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
-[![SLAM](https://img.shields.io/badge/SLAM-FAST--LIO2-red.svg)](https://github.com/hku-mars/FAST_LIO)
-[![LiDAR](https://img.shields.io/badge/LiDAR-Livox%20MID360-purple.svg)](https://www.livoxtech.com/mid-360)
-[![Build](https://img.shields.io/badge/Build-Passing-brightgreen.svg)](#)
+这是一个基于Livox MID360激光雷达的高精度实时SLAM（同时定位与建图）系统，专为穿越机和无人车等移动平台设计。系统采用光纤传输技术实现超低延迟数据传输，结合先进的FAST-LIO2算法进行实时建图。
 
-**🚁 Real-time SLAM mapping system based on Livox MID360 LiDAR**
+### ✨ 核心特点
 
-*High-precision real-time mapping and localization using FAST-LIO2 algorithm*
+- 🎯 **实时性能**: 基于FAST-LIO2算法，实现毫秒级定位更新
+- 🌐 **大范围建图**: 支持2km+半径的超大范围地图构建  
+- 🔄 **回环检测**: 集成PGO位姿图优化，消除累积误差
+- 📡 **光纤传输**: 超低延迟数据传输，适合高速移动平台
+- ⚙️ **统一配置**: v2.0配置管理系统，参数一致性保证
+- 🔧 **模块化**: 支持FastLIO2、PGO、HBA、Localizer独立启用
 
-[🚀 Quick Start](#quick-start) • [📖 Documentation](#documentation) • [🛠️ Tools](#tools) • [📊 Performance](#performance)
+## 📋 系统要求
 
-</div>
+- **操作系统**: Ubuntu 20.04/22.04 LTS
+- **ROS版本**: ROS2 Humble
+- **编译器**: C++17 支持 (GCC 7.0+)
+- **硬件要求**: 
+  - 内存: 8GB+ (推荐16GB)
+  - CPU: 4核心+ (推荐8核心)
+  - 存储: 50GB+ 可用空间
 
-## ✨ Features
+### 🔗 依赖库
 
-- 🗺️ **Real-time SLAM Mapping** - FAST-LIO2 algorithm with 10-20Hz mapping frequency
-- 📍 **Persistent Global Maps** - Accumulative mapping with ikd-tree for long-term persistence
-- 🎯 **High-precision Localization** - Sub-centimeter accuracy (8cm resolution) with enhanced parameters
-- 🔧 **One-click Management** - Fully automated system startup, shutdown and monitoring
-- 📊 **Enhanced 3D Visualization** - Real-time RViz2 display with high-density point clouds
-- 🛠️ **Advanced Toolchain** - Complete debugging, monitoring, and map saving tools
-- 🌐 **Network Optimized** - Custom IP configuration for reliable LiDAR communication
-- ⚡ **Performance Optimized** - Efficient ikd-tree with quality filtering and dense mapping
+| 组件 | 版本要求 | 用途 |
+|------|----------|------|
+| PCL | 1.10+ | 点云处理 |
+| Eigen3 | 3.3+ | 矩阵运算 |
+| GTSAM | 4.1+ | PGO/HBA优化 (可选) |
+| OpenMP | - | 并行计算加速 |
 
-## 🏗️ System Architecture
+## 🛠️ 快速开始
 
-```mermaid
-graph LR
-    A[MID360 LiDAR] -->|UDP Data| B[livox_ros_driver2]
-    B -->|Point Cloud| C[FAST-LIO2]
-    B -->|IMU Data| C
-    C -->|Odometry| D[RViz2 Visualization]
-    C -->|Trajectory| D
-    C -->|Map Cloud| D
-    E[Management Tools] -.->|Control| B
-    E -.->|Monitor| C
-```
-
-## 🚀 Quick Start
-
-### Prerequisites
-- Ubuntu 22.04 LTS
-- ROS2 Humble
-- C++17 compiler
-- Livox MID360 LiDAR
-
-### Installation
-
-1. **Clone the repository**
-```bash
-git clone https://github.com/YOUR_USERNAME/MID360_ROS2_SLAM.git
-cd MID360_ROS2_SLAM
-```
-
-2. **Install dependencies**
-```bash
-sudo apt update
-sudo apt install -y ros-humble-desktop-full
-sudo apt install -y ros-humble-pcl-conversions ros-humble-pcl-ros
-sudo apt install -y libpcl-dev libeigen3-dev libgtsam-dev
-```
-
-3. **Build the workspace**
-```bash
-cd ws_livox
-colcon build --cmake-args -DCMAKE_BUILD_TYPE=Release
-source install/setup.bash
-```
-
-4. **Configure network (one-time setup)**
-```bash
-# Set computer IP to 192.168.1.50
-# Set MID360 IP to 192.168.1.3 via Livox Viewer
-sudo chmod +x tools/*.sh
-```
-
-### Usage
-
-**Start the SLAM system:**
-```bash
-./tools/start_slam.sh
-```
-
-**Check system status:**
-```bash
-./tools/check_slam.sh
-```
-
-**Stop the system:**
-```bash
-./tools/stop_slam.sh
-```
-
-**Use management toolkit:**
-```bash
-./tools/slam_tools.sh help
-```
-
-## 🛠️ Tools
-
-| Script | Description |
-|--------|-------------|
-| `start_slam.sh` | 🚀 Launch complete SLAM system with network validation |
-| `stop_slam.sh` | 🛑 Clean shutdown with process management |
-| `check_slam.sh` | 🔍 Comprehensive system status checking |
-| `slam_tools.sh` | 🛠️ Multi-function management toolkit |
-
-### Advanced Usage
+### 1. 一键安装和编译
 
 ```bash
-# Monitor data streams
+# 克隆项目
+git clone <项目地址>
+cd Mid360map
+
+# 修复已知问题并编译
+./tools/slam_tools.sh fix
+./tools/slam_tools.sh build
+
+# 生成统一配置文件
+./tools/slam_tools.sh config-gen
+```
+
+### 2. 系统启动
+
+```bash
+# 启动完整SLAM系统 (推荐)
+./tools/slam_tools.sh start
+
+# 或仅启动基础SLAM
+./tools/slam_tools.sh start-basic
+```
+
+### 3. 系统监控
+
+```bash
+# 查看系统状态
+./tools/slam_tools.sh status
+
+# 实时监控数据流
 ./tools/slam_tools.sh monitor
 
-# Check network configuration  
-./tools/slam_tools.sh network
+# 查看配置状态  
+./tools/slam_tools.sh config
+```
 
-# View system logs
-./tools/slam_tools.sh log
+## 🏗️ 系统架构
 
-# Restart system
-./tools/slam_tools.sh restart
+### 核心组件
 
-# Save accumulated map
+```
+MID360雷达 ──→ UDP数据接收 ──→ FastLIO2 ──→ PGO/HBA/Localizer ──→ RViz可视化
+    ↓              ↓            ↓              ↓              ↓
+  原始点云      光纤传输优化    实时SLAM      后处理优化      建图结果展示
+```
+
+### 模块详情
+
+| 组件 | 功能 | 状态 | 依赖 |
+|------|------|------|------|
+| **FastLIO2** | 核心SLAM算法 | ✅ 已实现 | 必需 |
+| **PGO** | 位姿图优化 | ✅ 已实现 | GTSAM |
+| **HBA** | 分层束调整 | ✅ 已实现 | GTSAM |
+| **Localizer** | ICP定位 | ✅ 已实现 | PCL |
+| **可视化系统** | RViz增强界面 | ✅ 已实现 | - |
+
+## ⚙️ 配置管理
+
+### v2.0 统一配置系统
+
+系统采用全新的统一配置管理架构：
+
+```
+config/slam_master_config.yaml (主配置)
+    ↓
+tools/config_generator.py (自动生成器)
+    ↓
+各组件配置文件 (自动同步)
+```
+
+### 配置操作
+
+```bash
+# 查看配置状态
+./tools/slam_tools.sh config
+
+# 生成组件配置
+./tools/slam_tools.sh config-gen  
+
+# 验证配置一致性
+./tools/slam_tools.sh config-val
+```
+
+### 核心参数
+
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `scan_resolution` | 0.05m | 统一扫描分辨率 |
+| `map_resolution` | 0.08m | 地图分辨率 |
+| `cube_len` | 2000m | 局部地图范围 |
+| `topic_prefix` | `/fastlio2` | 统一话题前缀 |
+
+## 📊 数据流结构
+
+### ROS2话题
+
+**输入话题:**
+- `/livox/lidar` - MID360点云数据
+- `/livox/imu` - IMU惯性数据
+
+**输出话题:**
+- `/fastlio2/lio_odom` - 实时里程计
+- `/fastlio2/body_cloud` - 处理后点云
+- `/fastlio2/lio_path` - SLAM轨迹
+- `/fastlio2/world_cloud` - 全局地图
+
+### 坐标系
+
+```
+map (世界坐标系)
+ ↓
+lidar (本地坐标系)  
+ ↓
+body (机体坐标系)
+ ↓
+livox_frame (雷达坐标系)
+```
+
+## 🔧 故障排除
+
+### 常见问题
+
+**编译错误:**
+```bash
+./tools/slam_tools.sh fix    # 修复已知问题
+./tools/slam_tools.sh clean  # 清理重编译
+```
+
+**网络连接:**
+```bash
+./tools/slam_tools.sh network  # 检查网络配置
+ping 192.168.1.3              # 测试雷达连接
+```
+
+**配置不一致:**
+```bash
+./tools/slam_tools.sh config-gen  # 重新生成配置
+./tools/slam_tools.sh config-val  # 验证一致性
+```
+
+### 日志和调试
+
+```bash
+./tools/slam_tools.sh log      # 查看系统日志
+./tools/slam_tools.sh topics   # 查看活跃话题
+./tools/slam_tools.sh nodes    # 查看运行节点
+```
+
+## 💾 地图保存
+
+### 保存地图
+
+```bash
+# 保存当前地图和轨迹
 ./tools/slam_tools.sh save
+
+# 查看保存的地图
+./tools/slam_tools.sh view <地图文件.pcd>
+
+# 管理地图文件
+./tools/slam_tools.sh maps
 ```
 
-## 🗺️ Global Map Features
+### 地图格式
 
-### Persistent Accumulative Mapping
-- **Real-time Accumulation**: Points are continuously added to ikd-tree for global persistence
-- **High-density Visualization**: Enhanced RViz configuration with optimized point cloud display
-- **Quality Filtering**: Automatic removal of outliers and invalid points
-- **Memory Efficient**: ikd-tree structure for dynamic point cloud management
+- **点云地图**: `.pcd` 格式 (PCL标准)
+- **轨迹文件**: `.txt` 格式 (xyz坐标序列)
+- **优化地图**: PGO/HBA优化后的结果
 
-### Mapping Parameters (Optimized)
-- **Map Resolution**: 8cm (sub-centimeter accuracy)
-- **Scan Resolution**: 5cm for high-precision detail capture
-- **Detection Range**: 80m with noise filtering
-- **Update Frequency**: Every 5 frames for smooth visualization
+## 📈 性能优化
 
-## 📊 Performance
+### 系统调优
 
-### System Requirements
-- **CPU**: Intel i5+ / AMD equivalent
-- **Memory**: 8GB+ RAM
-- **Storage**: SSD recommended
-- **Network**: Gigabit Ethernet
+```bash
+# 检查依赖状态
+./tools/slam_tools.sh deps
 
-### Performance Metrics
-- **Real-time Performance**: 10-20Hz mapping frequency with persistent accumulation
-- **Accuracy**: Sub-centimeter positioning (8cm map resolution)
-- **Mapping Quality**: High-density point clouds with quality filtering
-- **Stability**: Long-term stable operation with continuous map building
-- **Resource Usage**: CPU <80%, Memory <3GB (with global map)
-
-## 🔧 Configuration
-
-### Network Configuration
-```yaml
-Computer IP: 192.168.1.50
-MID360 IP: 192.168.1.3
-Protocol: UDP multi-port transmission
-Data Types: Point Cloud + IMU fusion
+# 安装性能库
+./tools/slam_tools.sh gtsam  # 安装GTSAM优化库
 ```
 
-### Key SLAM Parameters
-```yaml
-# Main FAST-LIO2 parameters
-lidar_min_range: 0.5    # Minimum detection range
-lidar_max_range: 30.0   # Maximum detection range  
-scan_resolution: 0.15   # Scan resolution
-map_resolution: 0.3     # Map resolution
-cube_len: 300          # Map cube size
+### 参数调优
+
+主要性能参数 (在 `config/slam_master_config.yaml` 中):
+
+- `scan_resolution`: 降低值提高精度但增加计算量
+- `cube_len`: 控制内存使用和建图范围
+- `ieskf_max_iter`: 平衡精度和实时性
+
+## 📚 开发指南
+
+### 添加新组件
+
+1. 在 `ws_livox/src/` 下创建组件包
+2. 在 `slam_master_config.yaml` 中添加配置段
+3. 更新 `config_generator.py` 支持新组件
+4. 修改统一启动文件 `unified_slam_launch.py`
+
+### 配置管理
+
+所有配置修改都应该在主配置文件中进行：
+
+```bash
+# 编辑主配置
+nano config/slam_master_config.yaml
+
+# 重新生成组件配置
+./tools/slam_tools.sh config-gen
 ```
 
-## 📖 Documentation
+## 📄 许可证
 
-- [📋 PROJECT_SUMMARY.md](PROJECT_SUMMARY.md) - Complete technical documentation
-- [⚡ QUICK_START.md](QUICK_START.md) - 5-minute quick start guide  
-- [🔧 CLAUDE.md](CLAUDE.md) - Development and build instructions
-- [📖 README_SLAM.md](README_SLAM.md) - Detailed SLAM documentation
+MIT License - 详见 `LICENSE` 文件
 
-## 🗂️ Project Structure
+## 🤝 贡献
 
-```
-MID360_ROS2_SLAM/
-├── ws_livox/                    # ROS2 workspace
-│   ├── src/
-│   │   ├── livox_ros_driver2/   # Livox official driver
-│   │   ├── fastlio2/            # FAST-LIO2 core algorithm
-│   │   ├── interface/           # ROS2 service interfaces  
-│   │   ├── pgo/                 # Pose graph optimization (optional)
-│   │   ├── localizer/           # Relocalization (optional)
-│   │   └── hba/                 # Map optimization (optional)
-├── tools/                       # Management scripts
-│   ├── start_slam.sh           # System startup
-│   ├── stop_slam.sh            # System shutdown  
-│   ├── check_slam.sh           # Status checking
-│   └── slam_tools.sh           # Management toolkit
-└── docs/                       # Documentation
-```
+欢迎提交 Issue 和 Pull Request！
 
-## 🌟 Key Technologies
+### 报告问题
 
-### SLAM Algorithm
-- **FAST-LIO2**: Tightly-coupled LiDAR-inertial odometry
-- **ikd-Tree**: Efficient dynamic point cloud management  
-- **Real-time Processing**: Support for high-frequency SLAM computation
+1. 运行 `./tools/slam_tools.sh status` 获取系统状态
+2. 收集相关日志: `./tools/slam_tools.sh log`
+3. 在 GitHub Issues 中描述问题
 
-### Hardware Integration  
-- **Livox MID360**: 360° mechanical spinning LiDAR
-- **IMU Fusion**: Accelerometer and gyroscope data integration
-- **Network Optimization**: UDP communication with fiber optic support
+### 开发流程
 
-## 🤝 Contributing
+1. Fork 项目
+2. 创建特性分支
+3. 编写代码和测试
+4. 提交 Pull Request
 
-We welcome contributions! Please feel free to submit issues and pull requests.
+## 📞 技术支持
 
-1. Fork the repository
-2. Create your feature branch (`git checkout -b feature/AmazingFeature`)
-3. Commit your changes (`git commit -m 'Add AmazingFeature'`)
-4. Push to the branch (`git push origin feature/AmazingFeature`)
-5. Open a Pull Request
-
-## 📄 License
-
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
-## 🙏 Acknowledgments
-
-- [FAST-LIO2](https://github.com/hku-mars/FAST_LIO) - Original FAST-LIO2 algorithm
-- [FASTLIO2_ROS2](https://github.com/liangheming/FASTLIO2_ROS2) - ROS2 port implementation
-- [Livox](https://www.livoxtech.com/) - MID360 LiDAR hardware and drivers
-- ROS2 Community - Robotics framework and ecosystem
-
-## 📞 Support
-
-- 🐛 **Bug Reports**: [GitHub Issues](https://github.com/YOUR_USERNAME/MID360_ROS2_SLAM/issues)
-- 💬 **Discussions**: [GitHub Discussions](https://github.com/YOUR_USERNAME/MID360_ROS2_SLAM/discussions)  
-- 📖 **Documentation**: See [docs/](docs/) directory
-- 🔧 **Development**: See [CLAUDE.md](CLAUDE.md) for development setup
+- 📖 文档: 查看 `docs/` 目录
+- 🐛 Bug报告: GitHub Issues
+- 💡 功能建议: GitHub Discussions
 
 ---
 
-<div align="center">
-
-**🎯 Ready for production use with industrial-grade stability!**
-
-Made with ❤️ by the robotics community
-
-</div>
+**⚡ 快速命令参考:**
+```bash
+./tools/slam_tools.sh help     # 显示所有可用命令
+./tools/slam_tools.sh fix      # 修复编译问题
+./tools/slam_tools.sh build    # 编译系统  
+./tools/slam_tools.sh start    # 启动SLAM
+./tools/slam_tools.sh status   # 检查状态
+./tools/slam_tools.sh save     # 保存地图
+```

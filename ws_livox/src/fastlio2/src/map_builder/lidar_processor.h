@@ -33,6 +33,11 @@ public:
     
     // 获取全局累积地图点云
     CloudType::Ptr getGlobalMap();
+    
+    // 优化的地图管理接口
+    CloudType::Ptr getOptimizedGlobalMap(float resolution_scale = 1.0);
+    void optimizeMapMemory();
+    size_t getMapMemoryUsage() const;
 
 private:
     Config m_config;
@@ -48,4 +53,16 @@ private:
     CloudType::Ptr m_effect_norm_vec;
     std::vector<PointVec> m_nearest_points;
     pcl::VoxelGrid<PointType> m_scan_filter;
+    
+    // 优化的地图管理数据结构
+    std::shared_ptr<KD_TREE<PointType>> m_global_ikdtree;  // 全局低分辨率地图
+    CloudType::Ptr m_cached_global_map;                     // 缓存的全局地图
+    std::chrono::steady_clock::time_point m_cache_timestamp; // 缓存时间戳
+    static constexpr int CACHE_VALID_MS = 1000;             // 缓存有效时间1秒
+    size_t m_last_tree_size = 0;                           // 上次树的大小
+    
+    // 优化方法
+    void updateGlobalMapCache();
+    bool isCacheValid() const;
+    CloudType::Ptr downsampleMap(CloudType::Ptr input, float leaf_size) const;
 };

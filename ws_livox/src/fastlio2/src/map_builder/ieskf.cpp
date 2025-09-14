@@ -11,6 +11,30 @@ M3D JrInv(const V3D &inp)
     return Sophus::SO3d::leftJacobianInverse(inp).transpose();
 }
 
+// 旋转矩阵验证函数
+bool isValidRotationMatrix(const Eigen::Matrix3d& R, double tolerance) 
+{
+    Eigen::Matrix3d should_be_identity = R * R.transpose();
+    Eigen::Matrix3d identity = Eigen::Matrix3d::Identity();
+
+    return (should_be_identity - identity).norm() < tolerance &&
+           std::abs(R.determinant() - 1.0) < tolerance;
+}
+
+// 旋转矩阵正交化函数
+Eigen::Matrix3d enforceOrthogonality(const Eigen::Matrix3d& R) 
+{
+    Eigen::JacobiSVD<Eigen::Matrix3d> svd(R, Eigen::ComputeFullU | Eigen::ComputeFullV);
+    Eigen::Matrix3d result = svd.matrixU() * svd.matrixV().transpose();
+
+    // 确保行列式为正（避免反射）
+    if (result.determinant() < 0) {
+        result = -result;
+    }
+
+    return result;
+}
+
 void State::operator+=(const V21D &delta)
 {
     r_wi *= Sophus::SO3d::exp(delta.segment<3>(0)).matrix();
@@ -25,9 +49,32 @@ void State::operator+=(const V21D &delta)
 V21D State::operator-(const State &other) const
 {
     V21D delta = V21D::Zero();
-    delta.segment<3>(0) = Sophus::SO3d(other.r_wi.transpose() * r_wi).log();
+    
+    // 确保r_wi矩阵正交性
+    Eigen::Matrix3d relative_rotation = other.r_wi.transpose() * r_wi;
+    Eigen::JacobiSVD<Eigen::Matrix3d> svd(relative_rotation, 
+                                          Eigen::ComputeFullU | Eigen::ComputeFullV);
+    relative_rotation = svd.matrixU() * svd.matrixV().transpose();
+    
+    // 确保行列式为正（避免反射）
+    if (relative_rotation.determinant() < 0) {
+        relative_rotation = -relative_rotation;
+    }
+    
+    delta.segment<3>(0) = Sophus::SO3d(relative_rotation).log();
     delta.segment<3>(3) = t_wi - other.t_wi;
-    delta.segment<3>(6) = Sophus::SO3d(other.r_il.transpose() * r_il).log();
+    
+    // 同样处理r_il矩阵
+    Eigen::Matrix3d relative_rotation_il = other.r_il.transpose() * r_il;
+    Eigen::JacobiSVD<Eigen::Matrix3d> svd_il(relative_rotation_il, 
+                                             Eigen::ComputeFullU | Eigen::ComputeFullV);
+    relative_rotation_il = svd_il.matrixU() * svd_il.matrixV().transpose();
+    
+    if (relative_rotation_il.determinant() < 0) {
+        relative_rotation_il = -relative_rotation_il;
+    }
+    
+    delta.segment<3>(6) = Sophus::SO3d(relative_rotation_il).log();
     delta.segment<3>(9) = t_il - other.t_il;
     delta.segment<3>(12) = v - other.v;
     delta.segment<3>(15) = bg - other.bg;

@@ -1,0 +1,14 @@
+# PGO向FAST-LIO2发送优化后位姿的服务
+# 请求参数
+float64 timestamp      # 时间戳
+float64 x              # 优化后位置 X
+float64 y              # 优化后位置 Y  
+float64 z              # 优化后位置 Z
+float64 qw             # 优化后四元数 W
+float64 qx             # 优化后四元数 X
+float64 qy             # 优化后四元数 Y
+float64 qz             # 优化后四元数 Z
+---
+# 响应参数
+bool success           # 是否成功更新
+string message         # 反馈消息

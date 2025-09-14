@@ -1,0 +1,120 @@
+/* SLAM GUI 深色主题样式表 */
+
+QMainWindow {
+    background-color: #2b2b2b;
+    color: #ffffff;
+}
+
+QWidget {
+    background-color: #2b2b2b;
+    color: #ffffff;
+}
+
+QPushButton {
+    background-color: #404040;
+    color: white;
+    border: 1px solid #555555;
+    padding: 6px 12px;
+    border-radius: 3px;
+    font-weight: bold;
+}
+
+QPushButton:hover {
+    background-color: #4a4a4a;
+}
+
+QPushButton:pressed {
+    background-color: #2a2a2a;
+}
+
+QPushButton:disabled {
+    background-color: #2a2a2a;
+    color: #666666;
+}
+
+QGroupBox {
+    font-weight: bold;
+    border: 2px solid #404040;
+    border-radius: 5px;
+    margin: 3px;
+    padding-top: 10px;
+    color: white;
+}
+
+QGroupBox::title {
+    subcontrol-origin: margin;
+    subcontrol-position: top center;
+    padding: 0 5px;
+    color: white;
+}
+
+QTabWidget::pane {
+    border: 1px solid #404040;
+    background-color: #353535;
+}
+
+QTabBar::tab {
+    background-color: #2b2b2b;
+    color: white;
+    padding: 6px 12px;
+    border: 1px solid #404040;
+    border-bottom: none;
+}
+
+QTabBar::tab:selected {
+    background-color: #353535;
+}
+
+QTabBar::tab:hover {
+    background-color: #404040;
+}
+
+QTextEdit {
+    background-color: #1e1e1e;
+    color: white;
+    border: 1px solid #404040;
+    selection-background-color: #2a82da;
+}
+
+QTreeWidget, QTableWidget {
+    background-color: #1e1e1e;
+    color: white;
+    border: 1px solid #404040;
+    alternate-background-color: #2a2a2a;
+}
+
+QHeaderView::section {
+    background-color: #2b2b2b;
+    color: white;
+    padding: 4px;
+    border: 1px solid #404040;
+}
+
+QScrollBar:vertical {
+    background-color: #2b2b2b;
+    width: 12px;
+    border-radius: 6px;
+}
+
+QScrollBar::handle:vertical {
+    background-color: #555555;
+    border-radius: 6px;
+    min-height: 20px;
+}
+
+QScrollBar::handle:vertical:hover {
+    background-color: #666666;
+}
+
+QProgressBar {
+    border: 1px solid #404040;
+    border-radius: 3px;
+    text-align: center;
+    background-color: #1e1e1e;
+    color: white;
+}
+
+QProgressBar::chunk {
+    background-color: #2a82da;
+    border-radius: 2px;
+}

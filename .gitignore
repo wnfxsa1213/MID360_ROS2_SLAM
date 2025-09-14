@@ -57,3 +57,27 @@ Thumbs.db
 
 # 网络配置备份
 /etc/netplan/99-mid360.yaml.backup
+
+# SLAM数据
+saved_maps/
+recorded_bags/
+*.pcd
+*.ply
+
+# 配置备份文件
+*.backup.*
+*.bak.*
+
+# 临时PID文件
+/tmp/slam_record.pid
+
+# 屏幕截图
+screenshot-*.png
+screenshot-*.cam
+
+# VS Code工作空间
+*.code-workspace
+
+# 中文文件名（避免编码问题）
+*中文*
+分析报告*.md

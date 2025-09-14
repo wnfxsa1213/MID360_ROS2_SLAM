@@ -1,5 +1,6 @@
 string file_path
 bool save_patches
+bool enable_hba_refine
 ---
 bool success
 string message

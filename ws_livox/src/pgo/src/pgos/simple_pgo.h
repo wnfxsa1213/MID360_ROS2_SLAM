@@ -40,6 +40,13 @@ struct Config
     int loop_submap_half_range = 5;
     double submap_resolution = 0.1;
     double min_loop_detect_duration = 10.0;
+    
+    // 新增的增强功能参数
+    bool enable_pose_feedback = true;          // 启用位姿反馈
+    double feedback_frequency_hz = 2.0;        // 反馈频率
+    int max_optimization_time_ms = 200;        // 最大优化时间
+    bool enable_loop_visualization = true;     // 启用回环可视化
+    double keyframe_skip_distance = 0.1;       // 跳过过近关键帧距离
 };
 
 class SimplePGO

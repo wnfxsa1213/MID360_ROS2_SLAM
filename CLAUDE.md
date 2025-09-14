@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 项目概述
 
-这是一个基于Livox MID360激光雷达的穿越机实时SLAM建图系统，采用光纤传输技术实现超低延迟数据传输，结合FAST-LIO2算法进行实时建图。
+这是一个基于Livox MID360激光雷达的穿越机实时SLAM建图系统，采用光纤传输技术实现超低延迟数据传输，结合FAST-LIO2算法进行实时建图。将保存的地图进行精细化处理，供人员参考。
 
 ## 开发环境要求
 

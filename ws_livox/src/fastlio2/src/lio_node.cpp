@@ -15,6 +15,7 @@
 #include "interface/srv/sync_state.hpp"
 #include <pcl/io/pcd_io.h>
 #include <pcl/io/ply_io.h>
+#include <pcl/filters/voxel_grid.h>
 #include <fstream>
 #include <iomanip>
 #include <boost/filesystem.hpp>
@@ -44,6 +45,14 @@ struct NodeConfig
     std::string body_frame = "base_link";     // 修复：与配置文件保持一致
     std::string world_frame = "odom";        // 修复：与配置文件保持一致
     bool print_time_cost = false;
+    // world_cloud publish control
+    bool publish_world_cloud = false;
+    double world_cloud_rate_hz = 0.2;
+    double world_cloud_leaf = 0.25;
+    int world_cloud_qos_depth = 5;
+    bool adaptive_drop_enable = true;
+    double adaptive_drop_warn_ms = 60.0;
+    double adaptive_drop_drop_ms = 100.0;
 };
 struct StateData
 {
@@ -75,10 +84,14 @@ public:
             m_node_config.lidar_topic, 20, // 激光雷达队列增加到20，提供缓冲
             std::bind(&LIONode::lidarCB, this, std::placeholders::_1));
 
-        m_body_cloud_pub = this->create_publisher<sensor_msgs::msg::PointCloud2>("fastlio2/body_cloud", 10000);
-        m_world_cloud_pub = this->create_publisher<sensor_msgs::msg::PointCloud2>("fastlio2/world_cloud", 10000);
-        m_path_pub = this->create_publisher<nav_msgs::msg::Path>("fastlio2/lio_path", 10000);
-        m_odom_pub = this->create_publisher<nav_msgs::msg::Odometry>("fastlio2/lio_odom", 10000);
+        // QoS: clouds BestEffort + small KeepLast; odom/path Reliable
+        auto qos_cloud = rclcpp::QoS(rclcpp::KeepLast(std::max(1, m_node_config.world_cloud_qos_depth))).best_effort();
+        auto qos_odom = rclcpp::QoS(rclcpp::KeepLast(10)).reliable();
+
+        m_body_cloud_pub = this->create_publisher<sensor_msgs::msg::PointCloud2>("fastlio2/body_cloud", qos_cloud);
+        m_world_cloud_pub = this->create_publisher<sensor_msgs::msg::PointCloud2>("fastlio2/world_cloud", qos_cloud);
+        m_path_pub = this->create_publisher<nav_msgs::msg::Path>("fastlio2/lio_path", qos_odom);
+        m_odom_pub = this->create_publisher<nav_msgs::msg::Odometry>("fastlio2/lio_odom", qos_odom);
         m_imu_pose_pub = this->create_publisher<visualization_msgs::msg::Marker>("fastlio2/imu_pose_marker", 100);
         m_performance_pub = this->create_publisher<std_msgs::msg::Float64MultiArray>("fastlio2/performance_metrics", 100);
         m_diagnostics_pub = this->create_publisher<diagnostic_msgs::msg::DiagnosticArray>("fastlio2/diagnostics", 100);
@@ -172,6 +185,15 @@ public:
         m_builder_config.t_il << t_il_vec[0], t_il_vec[1], t_il_vec[2];
         m_builder_config.r_il << r_il_vec[0], r_il_vec[1], r_il_vec[2], r_il_vec[3], r_il_vec[4], r_il_vec[5], r_il_vec[6], r_il_vec[7], r_il_vec[8];
         m_builder_config.lidar_cov_inv = config["lidar_cov_inv"].as<double>();
+
+        // world cloud controls (optional)
+        if (config["publish_world_cloud"]) m_node_config.publish_world_cloud = config["publish_world_cloud"].as<bool>();
+        if (config["world_cloud_rate_hz"]) m_node_config.world_cloud_rate_hz = config["world_cloud_rate_hz"].as<double>();
+        if (config["world_cloud_leaf"]) m_node_config.world_cloud_leaf = config["world_cloud_leaf"].as<double>();
+        if (config["world_cloud_qos_depth"]) m_node_config.world_cloud_qos_depth = config["world_cloud_qos_depth"].as<int>();
+        if (config["adaptive_drop_enable"]) m_node_config.adaptive_drop_enable = config["adaptive_drop_enable"].as<bool>();
+        if (config["adaptive_drop_warn_ms"]) m_node_config.adaptive_drop_warn_ms = config["adaptive_drop_warn_ms"].as<double>();
+        if (config["adaptive_drop_drop_ms"]) m_node_config.adaptive_drop_drop_ms = config["adaptive_drop_drop_ms"].as<double>();
 
         // 加载缓冲区管理参数
         if (config["max_imu_buffer_size"]) {
@@ -692,6 +714,18 @@ public:
         } else {
             skip_counter = 0;
         }
+
+        // Adaptive drop: guard against back-pressure when world_cloud enabled
+        bool allow_world_cloud = m_node_config.publish_world_cloud;
+        bool allow_body_cloud = true;
+        if (m_node_config.adaptive_drop_enable) {
+            if (avg_processing_time > m_node_config.adaptive_drop_warn_ms) {
+                allow_world_cloud = false; // disable world when slow
+            }
+            if (avg_processing_time > m_node_config.adaptive_drop_drop_ms) {
+                allow_body_cloud = false; // keep only odom/path/TF
+            }
+        }
         
         if (m_node_config.print_time_cost)
         {
@@ -730,24 +764,37 @@ public:
 
         // 自适应发布策略：在高负载时优化发布频率
         if (!skip_visualization) {
-            CloudType::Ptr body_cloud = m_builder->lidar_processor()->transformCloud(m_package.cloud, m_kf->x().r_il, m_kf->x().t_il);
-            publishCloud(m_body_cloud_pub, body_cloud, m_node_config.body_frame, m_package.cloud_end_time);
+            if (allow_body_cloud) {
+                CloudType::Ptr body_cloud = m_builder->lidar_processor()->transformCloud(m_package.cloud, m_kf->x().r_il, m_kf->x().t_il);
+                publishCloud(m_body_cloud_pub, body_cloud, m_node_config.body_frame, m_package.cloud_end_time);
+            }
 
-            // 提升全局地图更新频率以增加点云密度
-            static int global_map_counter = 0;
-            global_map_counter++;
-            
-            // 每5帧发布一次全局地图 (之前每10帧)
-            if (global_map_counter % 5 == 0 && m_world_cloud_pub->get_subscription_count() > 0) {
-                CloudType::Ptr world_cloud = m_builder->lidar_processor()->getGlobalMap();
-                
-                if (world_cloud && !world_cloud->empty()) {
-                    publishCloud(m_world_cloud_pub, world_cloud, m_node_config.world_frame, m_package.cloud_end_time);
-                    RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 3000,
-                        "发布高密度全局地图，点数: %zu", world_cloud->size());
+            // world cloud: rate limit + downsample + only when subscribed
+            static rclcpp::Time last_world_pub_time(0,0, RCL_ROS_TIME);
+            if (allow_world_cloud && m_world_cloud_pub->get_subscription_count() > 0 && m_node_config.world_cloud_rate_hz > 0.0) {
+                auto now = this->get_clock()->now();
+                double period = 1.0 / m_node_config.world_cloud_rate_hz;
+                if (last_world_pub_time.nanoseconds() == 0 || (now - last_world_pub_time).seconds() >= period) {
+                    CloudType::Ptr world_cloud = m_builder->lidar_processor()->getGlobalMap();
+                    if (world_cloud && !world_cloud->empty()) {
+                        CloudType::Ptr ds(new CloudType);
+                        if (m_node_config.world_cloud_leaf > 0.0) {
+                            pcl::VoxelGrid<PointType> vg;
+                            vg.setLeafSize(m_node_config.world_cloud_leaf, m_node_config.world_cloud_leaf, m_node_config.world_cloud_leaf);
+                            vg.setInputCloud(world_cloud);
+                            vg.filter(*ds);
+                        } else {
+                            ds = world_cloud;
+                        }
+                        publishCloud(m_world_cloud_pub, ds, m_node_config.world_frame, m_package.cloud_end_time);
+                        last_world_pub_time = now;
+                        RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
+                                             "发布world_cloud(leaf=%.2f,rate=%.2fHz), 点数: %zu",
+                                             m_node_config.world_cloud_leaf, m_node_config.world_cloud_rate_hz, ds->size());
+                    }
                 }
             }
-            
+
             // 发布IMU姿态可视化
             publishIMUPose(m_imu_pose_pub, m_node_config.world_frame, m_package.cloud_end_time);
         }

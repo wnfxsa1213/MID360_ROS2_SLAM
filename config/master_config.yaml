@@ -114,8 +114,8 @@ fastlio2:
   map_resolution: 0.10              # 地图分辨率 (米)
 
   # 地图管理参数
-  cube_len: 200                     # 局部地图范围 (米)
-  det_range: 50                     # 检测范围 (米)
+  cube_len: 100                     # 局部地图范围 (米)
+  det_range: 10                     # 检测范围 (米)
   move_thresh: 1.0                  # 运动阈值 (米)
 
   # IMU噪声参数 (针对MID360内置IMU优化)

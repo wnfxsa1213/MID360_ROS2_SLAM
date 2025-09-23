@@ -1,0 +1,13 @@
+{
+  "bag_file": "data/clean_bags/raw_sensors/raw_sensors_0.db3",
+  "analysis_timestamp": "2025-09-23T16:14:31",
+  "topics": {
+    "/livox/imu": {
+      "message_count": 25725,
+      "duration": 129.8654716014862,
+      "avg_frequency": 198.08960521039373,
+      "avg_interval": 0.005048416715965099,
+      "std_interval": 0.015355775357152528,
+      "min_interval": 4.5299530029296875e-06,
+      "max_interval": 2.463700294494629,
+      "interval_outliers": 

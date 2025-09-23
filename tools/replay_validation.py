@@ -126,9 +126,11 @@ class SLAMValidator:
         self.processes.append(fastlio_proc)
 
         # 启动静态TF
+        # Base Link (IMU) -> Livox Frame (LiDAR)
+        # IMU in LiDAR frame: (0.011, 0.02329, -0.04412) => IMU->LiDAR: (-0.011, -0.02329, 0.04412)
         tf_proc = subprocess.Popen([
             'ros2', 'run', 'tf2_ros', 'static_transform_publisher',
-            '0', '0', '0', '0', '0', '0', 'base_link', 'livox_frame'
+            '-0.011', '-0.02329', '0.04412', '0', '0', '0', 'base_link', 'livox_frame'
         ], env=env)
         self.processes.append(tf_proc)
 

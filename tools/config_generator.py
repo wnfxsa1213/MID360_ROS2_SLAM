@@ -139,6 +139,15 @@ class ConfigGenerator:
                 yaml.dump(lio_config, f, default_flow_style=False, allow_unicode=True)
 
             print(f"✓ 成功生成FAST-LIO2配置: {output_path}")
+            # 同步到安装目录（如存在且非符号链接则覆盖），避免 FindPackageShare 读取旧文件
+            try:
+                install_cfg = self.project_root / "install/fastlio2/share/fastlio2/config/lio.yaml"
+                if install_cfg.exists() and not install_cfg.is_symlink():
+                    install_cfg.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(output_path, install_cfg)
+                    print(f"  ↳ 已同步到安装目录: {install_cfg}")
+            except Exception as e:
+                print(f"  ⚠ 同步到安装目录失败（可忽略，建议使用 --symlink-install 或重新编译）: {e}")
             return True
 
         except Exception as e:
@@ -390,6 +399,14 @@ class ConfigGenerator:
                 yaml.dump(pgo_config, f, default_flow_style=False, allow_unicode=True)
 
             print(f"✓ 成功生成PGO配置: {output_path}")
+            try:
+                install_cfg = self.project_root / "install/pgo/share/pgo/config/pgo.yaml"
+                if install_cfg.exists() and not install_cfg.is_symlink():
+                    install_cfg.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(output_path, install_cfg)
+                    print(f"  ↳ 已同步到安装目录: {install_cfg}")
+            except Exception as e:
+                print(f"  ⚠ 同步到安装目录失败: {e}")
             return True
 
         except Exception as e:
@@ -432,6 +449,14 @@ class ConfigGenerator:
                 yaml.dump(hba_config, f, default_flow_style=False, allow_unicode=True)
 
             print(f"✓ 成功生成HBA配置: {output_path}")
+            try:
+                install_cfg = self.project_root / "install/hba/share/hba/config/hba.yaml"
+                if install_cfg.exists() and not install_cfg.is_symlink():
+                    install_cfg.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(output_path, install_cfg)
+                    print(f"  ↳ 已同步到安装目录: {install_cfg}")
+            except Exception as e:
+                print(f"  ⚠ 同步到安装目录失败: {e}")
             return True
 
         except Exception as e:
@@ -489,6 +514,14 @@ class ConfigGenerator:
                 yaml.dump(localizer_config, f, default_flow_style=False, allow_unicode=True)
 
             print(f"✓ 成功生成Localizer配置: {output_path}")
+            try:
+                install_cfg = self.project_root / "install/localizer/share/localizer/config/localizer.yaml"
+                if install_cfg.exists() and not install_cfg.is_symlink():
+                    install_cfg.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(output_path, install_cfg)
+                    print(f"  ↳ 已同步到安装目录: {install_cfg}")
+            except Exception as e:
+                print(f"  ⚠ 同步到安装目录失败: {e}")
             return True
 
         except Exception as e:

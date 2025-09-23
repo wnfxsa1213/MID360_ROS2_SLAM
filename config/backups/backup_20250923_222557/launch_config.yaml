@@ -35,9 +35,9 @@ rosbag:
   topics:
   - /livox/lidar
   - /livox/imu
-  - /slam/lio_odom
-  - /slam/lio_path
-  - /slam/body_cloud
+  - /fastlio2/lio_odom
+  - /fastlio2/lio_path
+  - /fastlio2/body_cloud
   - /tf
   - /tf_static
 rviz:

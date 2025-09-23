@@ -68,7 +68,11 @@ def generate_launch_description():
             parameters=[{"config_path": lio_config_path}],
             remappings=[
                 ("/fastlio2/body_cloud", "/slam/body_cloud"),
-                ("/fastlio2/lio_odom", "/slam/lio_odom")
+                ("/fastlio2/lio_odom", "/slam/lio_odom"),
+                ("/fastlio2/world_cloud", "/slam/world_cloud"),
+                ("/fastlio2/lio_path", "/slam/lio_path"),
+                ("/fastlio2/performance_metrics", "/slam/performance_metrics"),
+                ("/fastlio2/diagnostics", "/slam/diagnostics")
             ]
         ),
 
@@ -155,11 +159,7 @@ def generate_launch_description():
                     <origin xyz="0 0 0.1" rpy="0 0 0"/>
                   </joint>
 
-                  <joint name="base_link_to_livox_frame" type="fixed">
-                    <parent link="base_link"/>
-                    <child link="livox_frame"/>
-                    <origin xyz="0 0 0.1" rpy="0 0 0"/>
-                  </joint>
+                  
 
                   <joint name="lidar_to_body" type="fixed">
                     <parent link="lidar"/>
@@ -178,12 +178,14 @@ def generate_launch_description():
             arguments=["0", "0", "0", "0", "0", "0", "map", "odom"]
         ),
 
-        # Base Link to Livox Frame变换发布器
+        # Base Link (IMU) to Livox Frame (LiDAR) 变换发布器
+        # 根据MID360规格：IMU在LiDAR坐标系下位置为(0.011, 0.02329, -0.04412)m
+        # 因此IMU->LiDAR的平移为(-0.011, -0.02329, 0.04412)
         launch_ros.actions.Node(
             package="tf2_ros",
             executable="static_transform_publisher",
             name="base_link_to_livox_frame_broadcaster",
-            arguments=["0", "0", "0.1", "0", "0", "0", "base_link", "livox_frame"]
+            arguments=["-0.011", "-0.02329", "0.04412", "0", "0", "0", "base_link", "livox_frame"]
         ),
 
         # === 增强可视化系统 ===

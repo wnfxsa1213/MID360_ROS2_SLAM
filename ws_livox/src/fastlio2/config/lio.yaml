@@ -1,11 +1,11 @@
 # FAST-LIO2配置文件
 # 由配置生成器自动生成，请勿手动修改
-# 生成时间: 2025-09-24 00:42:25
+# 生成时间: 2025-09-23 22:50:18
 # 主配置文件: /home/tianyu/codes/Mid360map/config/master_config.yaml
 
 body_frame: base_link
-cube_len: 100
-det_range: 10
+cube_len: 200
+det_range: 50
 enable_buffer_monitoring: true
 esti_il: true
 gravity_align: true

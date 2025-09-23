@@ -1,0 +1,13 @@
+# 状态同步服务 - 组件间状态同步
+# 请求
+string component_name
+int32 optimization_type  # 0:PGO, 1:HBA, 2:Localizer
+geometry_msgs/PoseArray optimized_trajectory
+float64[] covariance_matrix
+bool force_update
+---
+# 响应
+bool success
+string message
+geometry_msgs/Pose current_global_pose
+float64 sync_timestamp

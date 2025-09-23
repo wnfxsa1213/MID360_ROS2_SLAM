@@ -1,0 +1,15 @@
+# 优化触发服务 - 协调器触发多组件优化
+# 请求
+int32 optimization_level  # 0:轻度, 1:中度, 2:重度
+bool include_pgo
+bool include_hba
+bool include_localizer
+float64 drift_threshold
+bool emergency_mode
+---
+# 响应
+bool success
+string message
+float64 optimization_score
+float64 estimated_duration
+int32 active_optimizations

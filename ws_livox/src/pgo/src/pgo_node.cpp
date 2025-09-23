@@ -23,8 +23,8 @@ using namespace std::chrono_literals;
 
 struct NodeConfig
 {
-    std::string cloud_topic = "/lio/body_cloud";
-    std::string odom_topic = "/lio/odom";
+    std::string cloud_topic = "fastlio2/body_cloud";
+    std::string odom_topic = "fastlio2/lio_odom";
     std::string map_frame = "map";
     std::string local_frame = "lidar";
 };
@@ -47,13 +47,13 @@ public:
         rclcpp::QoS qos = rclcpp::QoS(10);
         m_cloud_sub.subscribe(this, m_node_config.cloud_topic, qos.get_rmw_qos_profile());
         m_odom_sub.subscribe(this, m_node_config.odom_topic, qos.get_rmw_qos_profile());
-        m_loop_marker_pub = this->create_publisher<visualization_msgs::msg::MarkerArray>("/pgo/loop_markers", 10000);
+        m_loop_marker_pub = this->create_publisher<visualization_msgs::msg::MarkerArray>("pgo/loop_markers", 10000);
         m_tf_broadcaster = std::make_shared<tf2_ros::TransformBroadcaster>(*this);
         m_sync = std::make_shared<message_filters::Synchronizer<message_filters::sync_policies::ApproximateTime<sensor_msgs::msg::PointCloud2, nav_msgs::msg::Odometry>>>(message_filters::sync_policies::ApproximateTime<sensor_msgs::msg::PointCloud2, nav_msgs::msg::Odometry>(10), m_cloud_sub, m_odom_sub);
         m_sync->setAgePenalty(0.1);
         m_sync->registerCallback(std::bind(&PGONode::syncCB, this, std::placeholders::_1, std::placeholders::_2));
         m_timer = this->create_wall_timer(50ms, std::bind(&PGONode::timerCB, this));
-        m_save_map_srv = this->create_service<interface::srv::SaveMaps>("/pgo/save_maps", std::bind(&PGONode::saveMapsCB, this, std::placeholders::_1, std::placeholders::_2));
+        m_save_map_srv = this->create_service<interface::srv::SaveMaps>("pgo/save_maps", std::bind(&PGONode::saveMapsCB, this, std::placeholders::_1, std::placeholders::_2));
     }
 
     void loadParameters()

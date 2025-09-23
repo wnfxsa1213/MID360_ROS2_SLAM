@@ -43,13 +43,13 @@ public:
         m_hba = std::make_shared<HBA>(m_hba_config);
         m_voxel_grid.setLeafSize(m_node_config.scan_resolution, m_node_config.scan_resolution, m_node_config.scan_resolution);
         m_refine_map_srv = this->create_service<interface::srv::RefineMap>(
-            "refine_map",
+            "hba/refine_map",
             std::bind(&HBANode::refineMapCB, this, std::placeholders::_1, std::placeholders::_2));
         m_save_poses_srv = this->create_service<interface::srv::SavePoses>(
-            "save_poses",
+            "hba/save_poses",
             std::bind(&HBANode::savePosesCB, this, std::placeholders::_1, std::placeholders::_2));
         m_timer = this->create_wall_timer(100ms, std::bind(&HBANode::mainCB, this));
-        m_cloud_pub = this->create_publisher<sensor_msgs::msg::PointCloud2>("map_points", 10);
+        m_cloud_pub = this->create_publisher<sensor_msgs::msg::PointCloud2>("hba/map_points", 10);
     }
 
     void loadParameters()

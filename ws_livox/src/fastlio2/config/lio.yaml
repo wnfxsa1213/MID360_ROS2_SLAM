@@ -1,37 +1,45 @@
-imu_topic: /livox/imu
-lidar_topic: /livox/lidar
-body_frame: body
-world_frame: lidar
-print_time_cost: true
+# FAST-LIO2配置文件
+# 由配置生成器自动生成，请勿手动修改
+# 生成时间: 2025-09-23 10:16:45
+# 主配置文件: /home/tianyu/codes/Mid360map/config/master_config.yaml
 
-lidar_filter_num: 2        # 降低滤波强度 (4→2，保留更多细节)
-lidar_min_range: 0.5
-# LiDAR参数优化 - 提升建图精度和点云密度
-lidar_max_range: 80.0      # 检测距离 (100→80m，减少远距离噪声)
-scan_resolution: 0.05      # 扫描分辨率 (0.08→0.05m，提升精度)
-map_resolution: 0.08       # 地图分辨率 (0.12→0.08m，大幅提升细节)
-
-# 地图持久化优化 - 彻底修复地图消失问题
-cube_len: 2000            # 局部地图范围 (1000→2000m，超大范围地图持久化)
-det_range: 300            # 检测范围 (200→300m，大幅扩展保留范围)  
-move_thresh: 2.0          # 运动阈值 (1.5→2.0，最小化地图清理触发)
-# 计算结果: det_thresh = 2.0 × 300 = 600m (雷达需移动600m才会触发地图清理)
-
-# IMU噪声参数优化 (针对MID360内置IMU)
-na: 0.005          # 加速度计噪声 (降低，MID360精度较好)
-ng: 0.005          # 陀螺仪噪声 (降低)
-nba: 0.0001        # 加速度计偏置噪声 (保持)
-nbg: 0.00005       # 陀螺仪偏置噪声 (稍微降低)
-
-# 精度优化: 提升建图质量
-imu_init_num: 150         # 初始化样本数 (100→150，更好的IMU标定)
-near_search_num: 10       # KNN搜索数 (6→10，提升匹配精度)
-ieskf_max_iter: 4         # IESKF迭代次数 (3→4，提升状态估计精度)
-
+body_frame: base_link
+cube_len: 200
+det_range: 50
+enable_buffer_monitoring: true
+esti_il: true
 gravity_align: true
-esti_il: false
-
-r_il: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
-t_il: [-0.011, -0.02329, 0.04412]
-
-lidar_cov_inv: 1500.0
+ieskf_max_iter: 8
+imu_init_num: 200
+imu_topic: /livox/imu
+lidar_cov_inv: 2000.0
+lidar_filter_num: 2
+lidar_max_range: 25.0
+lidar_min_range: 0.5
+lidar_topic: /livox/lidar
+map_resolution: 0.05
+max_imu_buffer_size: 1000
+max_lidar_buffer_size: 50
+move_thresh: 1.0
+na: 0.005
+nba: 0.0001
+nbg: 5.0e-05
+near_search_num: 20
+ng: 0.005
+print_time_cost: true
+r_il:
+- 1.0
+- 0.0
+- 0.0
+- 0.0
+- 1.0
+- 0.0
+- 0.0
+- 0.0
+- 1.0
+scan_resolution: 0.03
+t_il:
+- 0.011
+- 0.02329
+- -0.04412
+world_frame: odom

@@ -1,0 +1,13 @@
+# 位姿更新服务 - 用于优化结果反馈给FAST-LIO2
+# 请求
+geometry_msgs/PoseWithCovariance optimized_pose
+std_msgs/Header header
+bool reset_covariance
+float64 optimization_score
+string source_component
+---
+# 响应
+bool success
+string message
+geometry_msgs/PoseWithCovariance current_pose
+float64 state_update_time

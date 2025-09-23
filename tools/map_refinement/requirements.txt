@@ -1,0 +1,21 @@
+# 地图精细化工具依赖包
+# Core dependencies
+numpy>=1.21.0
+open3d>=0.15.0
+scikit-learn>=1.0.0
+scipy>=1.7.0
+
+# Visualization dependencies
+matplotlib>=3.5.0
+seaborn>=0.11.0
+
+# I/O and data processing
+PyYAML>=6.0
+tqdm>=4.62.0
+
+# Optional but recommended
+pandas>=1.3.0
+plotly>=5.0.0
+
+# For geometric processing
+shapely>=1.8.0

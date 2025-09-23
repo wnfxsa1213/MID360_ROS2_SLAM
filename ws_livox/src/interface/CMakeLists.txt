@@ -8,6 +8,8 @@ endif()
 # find dependencies
 find_package(ament_cmake REQUIRED)
 find_package(std_msgs REQUIRED)
+find_package(geometry_msgs REQUIRED)
+find_package(builtin_interfaces REQUIRED)
 find_package(rosidl_default_generators REQUIRED)
 
 rosidl_generate_interfaces(${PROJECT_NAME}
@@ -16,7 +18,11 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "srv/IsValid.srv"
   "srv/RefineMap.srv"
   "srv/SavePoses.srv"
-  DEPENDENCIES std_msgs
+  "srv/UpdatePose.srv"
+  "srv/SyncState.srv"
+  "srv/TriggerOptimization.srv"
+  "msg/FilterStats.msg"
+  DEPENDENCIES std_msgs geometry_msgs builtin_interfaces
 )
 
 

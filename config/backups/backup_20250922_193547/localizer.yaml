@@ -1,0 +1,18 @@
+# Localizer配置文件
+# 由配置生成器自动生成，请勿手动修改
+# 生成时间: 2025-09-22 19:30:58
+# 主配置文件: /home/tianyu/codes/Mid360map/config/master_config.yaml
+
+cloud_topic: /fastlio2/body_cloud
+local_frame: lidar
+map_frame: map
+odom_topic: /fastlio2/lio_odom
+refine_map_resolution: 0.1
+refine_max_iteration: 10
+refine_scan_resolution: 0.1
+refine_score_thresh: 0.1
+rough_map_resolution: 0.25
+rough_max_iteration: 5
+rough_scan_resolution: 0.25
+rough_score_thresh: 0.2
+update_hz: 1.0

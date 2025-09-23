@@ -5,6 +5,9 @@ from launch_ros.substitutions import FindPackageShare
 
 
 def generate_launch_description():
+    """
+    完整SLAM系统启动文件 - 现已支持协同工作模式
+    """
     # Livox驱动配置文件路径
     livox_config_path = PathJoinSubstitution([
         FindPackageShare('livox_ros_driver2'),
@@ -86,6 +89,20 @@ def generate_launch_description():
                 parameters=[{"config_path": localizer_config_path}]
             ),
             
+            # 🚀 优化协调器 - 启用协同工作
+            launch_ros.actions.Node(
+                package="cooperation",
+                executable="optimization_coordinator",
+                name="optimization_coordinator",
+                output="screen",
+                parameters=[{
+                    'drift_threshold': 0.3,
+                    'time_threshold': 30.0,
+                    'emergency_threshold': 1.0,
+                    'auto_optimization': True
+                }]
+            ),
+
             # RViz增强可视化显示
             launch_ros.actions.Node(
                 package="rviz2",

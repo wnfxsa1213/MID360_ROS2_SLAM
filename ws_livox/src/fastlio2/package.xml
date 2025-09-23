@@ -21,6 +21,7 @@
   <depend>visualization_msgs</depend>
   <depend>diagnostic_msgs</depend>
   <depend>sophus</depend>
+  <depend>interface</depend>
   
 
   <test_depend>ament_lint_auto</test_depend>

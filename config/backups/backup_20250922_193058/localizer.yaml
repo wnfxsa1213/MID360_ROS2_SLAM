@@ -1,0 +1,40 @@
+# Localizer配置文件
+# 由配置生成器自动生成，请勿手动修改
+# 生成时间: 2025-09-20 00:10:57
+# 主配置文件: /home/tianyu/codes/Mid360map/config/master_config.yaml
+
+cloud_topic: fastlio2/body_cloud
+local_frame: lidar
+map_frame: map
+odom_topic: fastlio2/lio_odom
+refine_map_resolution: 0.1
+refine_max_iteration: 10
+refine_scan_resolution: 0.1
+refine_score_thresh: 0.1
+rough_map_resolution: 0.25
+rough_max_iteration: 5
+rough_scan_resolution: 0.25
+rough_score_thresh: 0.2
+update_hz: 1.0
+
+# 动态对象过滤器配置
+dynamic_filter:
+  enable: true                      # 是否启用动态过滤器
+  publish_stats: true               # 是否发布统计信息
+
+  # 时间一致性参数
+  motion_threshold: 0.1             # 运动阈值(m)
+  history_size: 5                   # 历史帧数
+  stability_threshold: 0.8          # 稳定性阈值
+  max_time_diff: 0.5                # 最大时间差(s)
+
+  # 几何特征参数
+  search_radius: 0.2                # 邻域搜索半径(m)
+  min_neighbors: 10                 # 最小邻居点数
+  normal_consistency_thresh: 0.8    # 法向量一致性阈值
+  density_ratio_thresh: 0.5         # 密度比值阈值
+
+  # 性能参数
+  downsample_ratio: 2               # 降采样比例
+  max_points_per_frame: 50000       # 每帧最大点数
+  voxel_size_base: 0.01             # 基础体素大小(m)

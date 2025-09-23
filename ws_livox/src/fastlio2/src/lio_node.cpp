@@ -11,6 +11,8 @@
 
 #include "interface/srv/save_maps.hpp"
 #include "interface/srv/save_poses.hpp"
+#include "interface/srv/update_pose.hpp"
+#include "interface/srv/sync_state.hpp"
 #include <pcl/io/pcd_io.h>
 #include <pcl/io/ply_io.h>
 #include <fstream>
@@ -39,8 +41,8 @@ struct NodeConfig
 {
     std::string imu_topic = "/livox/imu";
     std::string lidar_topic = "/livox/lidar";
-    std::string body_frame = "body";
-    std::string world_frame = "lidar";
+    std::string body_frame = "base_link";     // 修复：与配置文件保持一致
+    std::string world_frame = "odom";        // 修复：与配置文件保持一致
     bool print_time_cost = false;
 };
 struct StateData
@@ -48,6 +50,7 @@ struct StateData
     bool lidar_pushed = false;
     std::mutex imu_mutex;
     std::mutex lidar_mutex;
+    std::mutex path_mutex;  // 添加路径数据保护锁
     double last_lidar_time = -1.0;
     double last_imu_time = -1.0;
     std::deque<IMUData> imu_buffer;
@@ -63,8 +66,14 @@ public:
         RCLCPP_INFO(this->get_logger(), "LIO Node Started");
         loadParameters();
 
-        m_imu_sub = this->create_subscription<sensor_msgs::msg::Imu>(m_node_config.imu_topic, 10, std::bind(&LIONode::imuCB, this, std::placeholders::_1));
-        m_lidar_sub = this->create_subscription<livox_ros_driver2::msg::CustomMsg>(m_node_config.lidar_topic, 10, std::bind(&LIONode::lidarCB, this, std::placeholders::_1));
+        // 优化订阅队列大小：IMU 1000Hz需要更大队列，激光雷达10Hz需要适中队列
+        m_imu_sub = this->create_subscription<sensor_msgs::msg::Imu>(
+            m_node_config.imu_topic, 100, // IMU队列增加到100，支持高频数据
+            std::bind(&LIONode::imuCB, this, std::placeholders::_1));
+
+        m_lidar_sub = this->create_subscription<livox_ros_driver2::msg::CustomMsg>(
+            m_node_config.lidar_topic, 20, // 激光雷达队列增加到20，提供缓冲
+            std::bind(&LIONode::lidarCB, this, std::placeholders::_1));
 
         m_body_cloud_pub = this->create_publisher<sensor_msgs::msg::PointCloud2>("fastlio2/body_cloud", 10000);
         m_world_cloud_pub = this->create_publisher<sensor_msgs::msg::PointCloud2>("fastlio2/world_cloud", 10000);
@@ -81,8 +90,21 @@ public:
             std::bind(&LIONode::saveMapsCB, this, std::placeholders::_1, std::placeholders::_2));
         
         m_save_poses_service = this->create_service<interface::srv::SavePoses>(
-            "fastlio2/save_poses", 
+            "fastlio2/save_poses",
             std::bind(&LIONode::savePosesCB, this, std::placeholders::_1, std::placeholders::_2));
+
+        // 创建协同工作服务
+        m_update_pose_service = this->create_service<interface::srv::UpdatePose>(
+            "fastlio2/update_pose",
+            std::bind(&LIONode::updatePoseCB, this, std::placeholders::_1, std::placeholders::_2));
+
+        m_sync_state_service = this->create_service<interface::srv::SyncState>(
+            "fastlio2/sync_state",
+            std::bind(&LIONode::syncStateCB, this, std::placeholders::_1, std::placeholders::_2));
+
+        // 协同状态发布者
+        m_coop_status_pub = this->create_publisher<std_msgs::msg::Float64MultiArray>(
+            "fastlio2/cooperation_status", 10);
 
         m_state_data.path.poses.clear();
         m_state_data.path.header.frame_id = m_node_config.world_frame;
@@ -90,11 +112,18 @@ public:
         m_kf = std::make_shared<IESKF>();
         m_builder = std::make_shared<MapBuilder>(m_builder_config, m_kf);
         
-        // 内存优化：预分配点云内存池
+        // 内存优化：初始化自适应点云内存池
         m_body_cloud_pool.reset(new CloudType);
         m_world_cloud_pool.reset(new CloudType);
-        m_body_cloud_pool->reserve(50000);  // 预分配5万个点的内存
-        m_world_cloud_pool->reserve(50000);
+
+        // 初始分配基于MID360典型点云大小（约20K-30K点）
+        size_t initial_pool_size = 35000;
+        m_body_cloud_pool->points.reserve(initial_pool_size);
+        m_world_cloud_pool->points.reserve(initial_pool_size);
+
+        // 初始化内存池统计
+        m_max_observed_cloud_size = 0;
+        m_pool_resize_counter = 0;
         
         m_timer = this->create_wall_timer(10ms, std::bind(&LIONode::timerCB, this));
     }
@@ -143,6 +172,21 @@ public:
         m_builder_config.t_il << t_il_vec[0], t_il_vec[1], t_il_vec[2];
         m_builder_config.r_il << r_il_vec[0], r_il_vec[1], r_il_vec[2], r_il_vec[3], r_il_vec[4], r_il_vec[5], r_il_vec[6], r_il_vec[7], r_il_vec[8];
         m_builder_config.lidar_cov_inv = config["lidar_cov_inv"].as<double>();
+
+        // 加载缓冲区管理参数
+        if (config["max_imu_buffer_size"]) {
+            m_builder_config.max_imu_buffer_size = config["max_imu_buffer_size"].as<int>();
+        }
+        if (config["max_lidar_buffer_size"]) {
+            m_builder_config.max_lidar_buffer_size = config["max_lidar_buffer_size"].as<int>();
+        }
+        if (config["enable_buffer_monitoring"]) {
+            m_builder_config.enable_buffer_monitoring = config["enable_buffer_monitoring"].as<bool>();
+        }
+
+        RCLCPP_INFO(this->get_logger(), "缓冲区配置 - IMU最大: %d, 激光最大: %d, 监控: %s",
+                   m_builder_config.max_imu_buffer_size, m_builder_config.max_lidar_buffer_size,
+                   m_builder_config.enable_buffer_monitoring ? "启用" : "禁用");
     }
 
     void imuCB(const sensor_msgs::msg::Imu::SharedPtr msg)
@@ -151,10 +195,41 @@ public:
         double timestamp = Utils::getSec(msg->header);
         if (timestamp < m_state_data.last_imu_time)
         {
-            RCLCPP_WARN(this->get_logger(), "IMU Message is out of order");
-            std::deque<IMUData>().swap(m_state_data.imu_buffer);
+            // 智能异常处理：检查时序错误的严重程度
+            double time_diff = m_state_data.last_imu_time - timestamp;
+            if (time_diff > 0.1) // 时序错误超过100ms，认为是严重错误
+            {
+                RCLCPP_WARN(this->get_logger(), "严重IMU时序错误 (%.3fs)，清空缓冲区", time_diff);
+                std::deque<IMUData>().swap(m_state_data.imu_buffer);
+            }
+            else
+            {
+                // 轻微时序错误，只移除冲突的数据点
+                RCLCPP_WARN(this->get_logger(), "轻微IMU时序错误 (%.3fs)，移除冲突数据", time_diff);
+                while (!m_state_data.imu_buffer.empty() &&
+                       m_state_data.imu_buffer.back().time >= timestamp)
+                {
+                    m_state_data.imu_buffer.pop_back();
+                }
+            }
         }
-        m_state_data.imu_buffer.emplace_back(V3D(msg->linear_acceleration.x, msg->linear_acceleration.y, msg->linear_acceleration.z) * 10.0,
+
+        // 检查IMU缓冲区大小，防止无限增长
+        while (m_state_data.imu_buffer.size() >= static_cast<size_t>(m_builder_config.max_imu_buffer_size))
+        {
+            m_state_data.imu_buffer.pop_front();
+            if (m_builder_config.enable_buffer_monitoring)
+            {
+                static int overflow_counter = 0;
+                if (++overflow_counter % 100 == 0)
+                {
+                    RCLCPP_WARN(this->get_logger(), "IMU缓冲区溢出 #%d，丢弃旧数据", overflow_counter);
+                }
+            }
+        }
+
+        // Livox driver publishes linear_acceleration in g; convert to m/s^2 using 9.81
+        m_state_data.imu_buffer.emplace_back(V3D(msg->linear_acceleration.x, msg->linear_acceleration.y, msg->linear_acceleration.z) * 9.81,
                                              V3D(msg->angular_velocity.x, msg->angular_velocity.y, msg->angular_velocity.z),
                                              timestamp);
         m_state_data.last_imu_time = timestamp;
@@ -165,7 +240,7 @@ public:
         lidar_counter++;
         if (lidar_counter % 100 == 0) // 每100次回调打印一次
         {
-            RCLCPP_INFO(this->get_logger(), "收到激光雷达数据 #%d, 点数量: %zu", lidar_counter, msg->point_num);
+            RCLCPP_INFO(this->get_logger(), "收到激光雷达数据 #%d, 点数量: %u", lidar_counter, msg->point_num);
         }
         
         CloudType::Ptr cloud = Utils::livox2PCL(msg, m_builder_config.lidar_filter_num, m_builder_config.lidar_min_range, m_builder_config.lidar_max_range);
@@ -180,26 +255,74 @@ public:
         double timestamp = Utils::getSec(msg->header);
         if (timestamp < m_state_data.last_lidar_time)
         {
-            RCLCPP_WARN(this->get_logger(), "Lidar Message is out of order");
-            std::deque<std::pair<double, pcl::PointCloud<pcl::PointXYZINormal>::Ptr>>().swap(m_state_data.lidar_buffer);
+            // 智能异常处理：检查时序错误的严重程度
+            double time_diff = m_state_data.last_lidar_time - timestamp;
+            if (time_diff > 0.2) // 激光雷达时序错误超过200ms，认为是严重错误
+            {
+                RCLCPP_WARN(this->get_logger(), "严重激光雷达时序错误 (%.3fs)，清空缓冲区", time_diff);
+                std::deque<std::pair<double, pcl::PointCloud<pcl::PointXYZINormal>::Ptr>>().swap(m_state_data.lidar_buffer);
+                m_state_data.lidar_pushed = false; // 重置推送状态
+            }
+            else
+            {
+                // 轻微时序错误，只移除冲突的数据点
+                RCLCPP_WARN(this->get_logger(), "轻微激光雷达时序错误 (%.3fs)，移除冲突数据", time_diff);
+                while (!m_state_data.lidar_buffer.empty() &&
+                       m_state_data.lidar_buffer.back().first >= timestamp)
+                {
+                    m_state_data.lidar_buffer.pop_back();
+                }
+                m_state_data.lidar_pushed = false; // 重置推送状态以重新同步
+            }
         }
+
+        // 检查激光雷达缓冲区大小，防止无限增长
+        while (m_state_data.lidar_buffer.size() >= static_cast<size_t>(m_builder_config.max_lidar_buffer_size))
+        {
+            m_state_data.lidar_buffer.pop_front();
+            if (m_builder_config.enable_buffer_monitoring)
+            {
+                static int overflow_counter = 0;
+                if (++overflow_counter % 10 == 0)
+                {
+                    RCLCPP_WARN(this->get_logger(), "激光雷达缓冲区溢出 #%d，丢弃旧数据", overflow_counter);
+                }
+            }
+        }
+
         m_state_data.lidar_buffer.emplace_back(timestamp, cloud);
         m_state_data.last_lidar_time = timestamp;
     }
 
     bool syncPackage()
     {
+        // 使用双重锁机制确保线程安全
+        // 注意：总是按照固定顺序获取锁以避免死锁
+        std::lock_guard<std::mutex> imu_lock(m_state_data.imu_mutex);
+        std::lock_guard<std::mutex> lidar_lock(m_state_data.lidar_mutex);
+
         if (m_state_data.imu_buffer.empty() || m_state_data.lidar_buffer.empty())
             return false;
+
         if (!m_state_data.lidar_pushed)
         {
             m_package.cloud = m_state_data.lidar_buffer.front().second;
+
+            // 检查点云是否有效
+            if (!m_package.cloud || m_package.cloud->empty())
+            {
+                RCLCPP_WARN(this->get_logger(), "同步包中检测到无效点云，跳过此帧");
+                m_state_data.lidar_buffer.pop_front();
+                return false;
+            }
+
             std::sort(m_package.cloud->points.begin(), m_package.cloud->points.end(), [](PointType &p1, PointType &p2)
                       { return p1.curvature < p2.curvature; });
             m_package.cloud_start_time = m_state_data.lidar_buffer.front().first;
             m_package.cloud_end_time = m_package.cloud_start_time + m_package.cloud->points.back().curvature / 1000.0;
             m_state_data.lidar_pushed = true;
         }
+
         if (m_state_data.last_imu_time < m_package.cloud_end_time)
             return false;
 
@@ -209,6 +332,7 @@ public:
             m_package.imus.emplace_back(m_state_data.imu_buffer.front());
             m_state_data.imu_buffer.pop_front();
         }
+
         m_state_data.lidar_buffer.pop_front();
         m_state_data.lidar_pushed = false;
         return true;
@@ -253,6 +377,7 @@ public:
     {
         if (path_pub->get_subscription_count() <= 0)
             return;
+
         geometry_msgs::msg::PoseStamped pose;
         pose.header.frame_id = frame_id;
         pose.header.stamp = Utils::getTime(time);
@@ -264,8 +389,13 @@ public:
         pose.pose.orientation.y = q.y();
         pose.pose.orientation.z = q.z();
         pose.pose.orientation.w = q.w();
-        m_state_data.path.poses.push_back(pose);
-        path_pub->publish(m_state_data.path);
+
+        // 使用锁保护路径数据的并发访问
+        {
+            std::lock_guard<std::mutex> lock(m_state_data.path_mutex);
+            m_state_data.path.poses.push_back(pose);
+            path_pub->publish(m_state_data.path);
+        }
     }
 
     void publishIMUPose(rclcpp::Publisher<visualization_msgs::msg::Marker>::SharedPtr marker_pub, std::string frame_id, const double &time)
@@ -446,43 +576,32 @@ public:
                 boost::filesystem::create_directories(save_dir);
             }
 
-            // 从ikd-tree获取稠密地图点云
-            CloudType::Ptr dense_map(new CloudType);
+            // 从ikd-tree获取全局累积的稠密地图点云
             if (m_builder && m_builder->lidar_processor() && m_builder->status() == BuilderStatus::MAPPING) {
-                // 获取ikd-tree中的所有点
-                std::vector<PointType, Eigen::aligned_allocator<PointType>> all_points;
-                auto ikd_tree = m_builder->lidar_processor();
-                // 注意：这里需要访问lidar_processor的ikd_tree，可能需要添加public方法
-                // 暂时使用一种更直接的方法，通过获取当前发布的世界坐标点云
-                
-                RCLCPP_INFO(this->get_logger(), "正在保存稠密点云地图到: %s", request->file_path.c_str());
-                
-                // 保存当前累积的地图（通过最新的世界坐标点云）
-                if (m_package.cloud) {
-                    CloudType::Ptr world_cloud = m_builder->lidar_processor()->transformCloud(
-                        m_package.cloud, 
-                        m_builder->lidar_processor()->r_wl(), 
-                        m_builder->lidar_processor()->t_wl()
-                    );
-                    
+                RCLCPP_INFO(this->get_logger(), "正在保存全局累积地图到: %s", request->file_path.c_str());
+
+                // 使用getGlobalMap()获取ikd-tree中的所有累积点云
+                CloudType::Ptr global_map = m_builder->lidar_processor()->getGlobalMap();
+
+                if (global_map && !global_map->empty()) {
                     // 根据文件扩展名选择保存格式
                     std::string file_path = request->file_path;
                     if (file_path.substr(file_path.find_last_of(".") + 1) == "ply") {
-                        pcl::io::savePLYFileBinary(file_path, *world_cloud);
+                        pcl::io::savePLYFileBinary(file_path, *global_map);
                     } else {
                         // 默认保存为PCD格式
                         if (file_path.substr(file_path.find_last_of(".") + 1) != "pcd") {
                             file_path += ".pcd";
                         }
-                        pcl::io::savePCDFileBinary(file_path, *world_cloud);
+                        pcl::io::savePCDFileBinary(file_path, *global_map);
                     }
-                    
+
                     response->success = true;
-                    response->message = "地图保存成功，点云数量: " + std::to_string(world_cloud->size());
-                    RCLCPP_INFO(this->get_logger(), "地图保存完成，点数: %zu", world_cloud->size());
+                    response->message = "全局累积地图保存成功，点云数量: " + std::to_string(global_map->size());
+                    RCLCPP_INFO(this->get_logger(), "全局地图保存完成，累积点数: %zu", global_map->size());
                 } else {
                     response->success = false;
-                    response->message = "无可用的点云数据";
+                    response->message = "无法获取全局地图数据或地图为空";
                 }
             } else {
                 response->success = false;
@@ -644,6 +763,9 @@ public:
         if (++diag_counter % 5 == 0) {
             publishDiagnostics(m_diagnostics_pub, time_used, m_package.cloud_end_time);
         }
+
+        // 内存池自适应管理
+        manageMemoryPools();
     }
 
 private:
@@ -661,6 +783,11 @@ private:
     rclcpp::Service<interface::srv::SaveMaps>::SharedPtr m_save_maps_service;
     rclcpp::Service<interface::srv::SavePoses>::SharedPtr m_save_poses_service;
 
+    // 协同工作服务
+    rclcpp::Service<interface::srv::UpdatePose>::SharedPtr m_update_pose_service;
+    rclcpp::Service<interface::srv::SyncState>::SharedPtr m_sync_state_service;
+    rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr m_coop_status_pub;
+
     rclcpp::TimerBase::SharedPtr m_timer;
     StateData m_state_data;
     SyncPackage m_package;
@@ -673,12 +800,303 @@ private:
     // 内存优化：点云内存池
     CloudType::Ptr m_body_cloud_pool;
     CloudType::Ptr m_world_cloud_pool;
+
+    // 内存池管理统计
+    size_t m_max_observed_cloud_size;
+    int m_pool_resize_counter;
+
+    // 协同状态
+    struct CooperationState {
+        int feedback_count = 0;
+        double average_optimization_score = 0.0;
+        rclcpp::Time last_pgo_update;
+        rclcpp::Time last_hba_update;
+        rclcpp::Time last_localizer_update;
+    } m_coop_state;
+
+    // 协同工作回调函数
+    void updatePoseCB(const std::shared_ptr<interface::srv::UpdatePose::Request> request,
+                      std::shared_ptr<interface::srv::UpdatePose::Response> response);
+
+    void syncStateCB(const std::shared_ptr<interface::srv::SyncState::Request> request,
+                     std::shared_ptr<interface::srv::SyncState::Response> response);
+
+    // 内存池管理函数
+    void manageMemoryPools();
+
+    bool updateIESKFWithOptimizedPose(const geometry_msgs::msg::PoseWithCovariance& optimized_pose);
+    double calculateUpdateWeight(double position_error);
+    void updateCooperationState(const std::string& source, double score);
+    geometry_msgs::msg::PoseWithCovariance getCurrentPoseWithCovariance();
+    geometry_msgs::msg::Pose getCurrentGlobalPose();
 };
+
+// 协同工作回调函数实现
+void LIONode::updatePoseCB(const std::shared_ptr<interface::srv::UpdatePose::Request> request,
+                           std::shared_ptr<interface::srv::UpdatePose::Response> response)
+{
+    try {
+        RCLCPP_INFO(this->get_logger(),
+            "🔄 收到来自 %s 的位姿优化反馈，分数: %.4f",
+            request->source_component.c_str(), request->optimization_score);
+
+        // 验证优化结果的可信度
+        if (request->optimization_score > 0.5) {
+            response->success = false;
+            response->message = "优化分数过低，拒绝更新";
+            return;
+        }
+
+        // 更新IESKF状态
+        bool update_success = updateIESKFWithOptimizedPose(request->optimized_pose);
+
+        if (update_success) {
+            updateCooperationState(request->source_component, request->optimization_score);
+
+            response->success = true;
+            response->message = "位姿更新成功";
+            response->current_pose = getCurrentPoseWithCovariance();
+            response->state_update_time = this->get_clock()->now().seconds();
+
+            m_coop_state.feedback_count++;
+
+            RCLCPP_INFO(this->get_logger(),
+                "✅ SLAM状态更新成功 (来源: %s, 累计反馈: %d次)",
+                request->source_component.c_str(), m_coop_state.feedback_count);
+        } else {
+            response->success = false;
+            response->message = "IESKF状态更新失败";
+        }
+
+    } catch (const std::exception& e) {
+        response->success = false;
+        response->message = "位姿更新异常: " + std::string(e.what());
+        RCLCPP_ERROR(this->get_logger(), "位姿更新异常: %s", e.what());
+    }
+}
+
+void LIONode::syncStateCB(const std::shared_ptr<interface::srv::SyncState::Request> request,
+                          std::shared_ptr<interface::srv::SyncState::Response> response)
+{
+    RCLCPP_INFO(this->get_logger(),
+        "🔄 状态同步请求 - 组件: %s, 类型: %d",
+        request->component_name.c_str(), request->optimization_type);
+
+    try {
+        auto now = this->get_clock()->now();
+        switch(request->optimization_type) {
+            case 0: // PGO优化
+                m_coop_state.last_pgo_update = now;
+                break;
+            case 1: // HBA优化
+                m_coop_state.last_hba_update = now;
+                break;
+            case 2: // Localizer重定位
+                m_coop_state.last_localizer_update = now;
+                break;
+            default:
+                RCLCPP_WARN(this->get_logger(), "未知的优化类型: %d", request->optimization_type);
+        }
+
+        response->success = true;
+        response->message = "状态同步成功";
+        response->current_global_pose = getCurrentGlobalPose();
+        response->sync_timestamp = now.seconds();
+
+    } catch (const std::exception& e) {
+        response->success = false;
+        response->message = "状态同步失败: " + std::string(e.what());
+    }
+}
+
+bool LIONode::updateIESKFWithOptimizedPose(const geometry_msgs::msg::PoseWithCovariance& optimized_pose)
+{
+    try {
+        // 提取优化后的位姿
+        V3D optimized_position(
+            optimized_pose.pose.position.x,
+            optimized_pose.pose.position.y,
+            optimized_pose.pose.position.z
+        );
+
+        Eigen::Quaterniond optimized_quat(
+            optimized_pose.pose.orientation.w,
+            optimized_pose.pose.orientation.x,
+            optimized_pose.pose.orientation.y,
+            optimized_pose.pose.orientation.z
+        );
+
+        M3D optimized_rotation = optimized_quat.toRotationMatrix();
+
+        // 计算与当前状态的差异
+        V3D current_position = m_kf->x().t_wi;
+        M3D current_rotation = m_kf->x().r_wi;
+
+        V3D position_diff = optimized_position - current_position;
+        double position_error = position_diff.norm();
+
+        // 渐进式更新策略
+        double update_weight = calculateUpdateWeight(position_error);
+
+        if (update_weight > 0.01) {
+            // 更新IESKF状态
+            V3D updated_position = current_position + update_weight * position_diff;
+
+            // 旋转插值更新
+            Eigen::Quaterniond current_quat(current_rotation);
+            Eigen::Quaterniond updated_quat = current_quat.slerp(update_weight, optimized_quat);
+            M3D updated_rotation = updated_quat.toRotationMatrix();
+
+            // 应用更新到IESKF
+            m_kf->x().t_wi = updated_position;
+            m_kf->x().r_wi = updated_rotation;
+
+            RCLCPP_DEBUG(this->get_logger(),
+                "IESKF状态更新: 位置误差=%.3fm, 更新权重=%.3f",
+                position_error, update_weight);
+
+            return true;
+        }
+
+        return false;
+
+    } catch (const std::exception& e) {
+        RCLCPP_ERROR(this->get_logger(), "IESKF状态更新异常: %s", e.what());
+        return false;
+    }
+}
+
+double LIONode::calculateUpdateWeight(double position_error)
+{
+    if (position_error < 0.1) {
+        return 0.8;  // 小误差：高权重
+    } else if (position_error < 0.5) {
+        return 0.5;  // 中等误差：中权重
+    } else if (position_error < 2.0) {
+        return 0.2;  // 大误差：低权重
+    } else {
+        return 0.05; // 超大误差：很低权重
+    }
+}
+
+void LIONode::updateCooperationState(const std::string& source, double score)
+{
+    // 更新平均分数
+    double alpha = 0.1;
+    m_coop_state.average_optimization_score =
+        alpha * score + (1.0 - alpha) * m_coop_state.average_optimization_score;
+
+    // 发布协同状态
+    std_msgs::msg::Float64MultiArray msg;
+    msg.data.resize(6);
+    msg.data[0] = m_coop_state.feedback_count;
+    msg.data[1] = m_coop_state.average_optimization_score;
+    msg.data[2] = (this->get_clock()->now() - m_coop_state.last_pgo_update).seconds();
+    msg.data[3] = (this->get_clock()->now() - m_coop_state.last_hba_update).seconds();
+    msg.data[4] = (this->get_clock()->now() - m_coop_state.last_localizer_update).seconds();
+    msg.data[5] = 1.0; // 协同功能已启用
+
+    m_coop_status_pub->publish(msg);
+}
+
+geometry_msgs::msg::PoseWithCovariance LIONode::getCurrentPoseWithCovariance()
+{
+    geometry_msgs::msg::PoseWithCovariance pose_cov;
+
+    V3D position = m_kf->x().t_wi;
+    pose_cov.pose.position.x = position.x();
+    pose_cov.pose.position.y = position.y();
+    pose_cov.pose.position.z = position.z();
+
+    Eigen::Quaterniond quat(m_kf->x().r_wi);
+    pose_cov.pose.orientation.w = quat.w();
+    pose_cov.pose.orientation.x = quat.x();
+    pose_cov.pose.orientation.y = quat.y();
+    pose_cov.pose.orientation.z = quat.z();
+
+    // 简化协方差矩阵
+    for (int i = 0; i < 36; i++) {
+        pose_cov.covariance[i] = (i % 7 == 0) ? 0.01 : 0.0;
+    }
+
+    return pose_cov;
+}
+
+geometry_msgs::msg::Pose LIONode::getCurrentGlobalPose()
+{
+    geometry_msgs::msg::Pose pose;
+
+    V3D position = m_kf->x().t_wi;
+    pose.position.x = position.x();
+    pose.position.y = position.y();
+    pose.position.z = position.z();
+
+    Eigen::Quaterniond quat(m_kf->x().r_wi);
+    pose.orientation.w = quat.w();
+    pose.orientation.x = quat.x();
+    pose.orientation.y = quat.y();
+    pose.orientation.z = quat.z();
+
+    return pose;
+}
+
+void LIONode::manageMemoryPools()
+{
+    // 每100次调用进行一次内存池检查（约1秒检查一次，因为定时器是10ms）
+    static int check_counter = 0;
+    if (++check_counter % 100 != 0) {
+        return;
+    }
+
+    // 获取当前点云大小
+    size_t current_cloud_size = 0;
+    if (m_package.cloud && !m_package.cloud->empty()) {
+        current_cloud_size = m_package.cloud->size();
+
+        // 更新观察到的最大点云大小
+        if (current_cloud_size > m_max_observed_cloud_size) {
+            m_max_observed_cloud_size = current_cloud_size;
+        }
+    }
+
+    // 检查是否需要调整内存池大小 - 使用points向量的容量
+    size_t current_capacity = m_body_cloud_pool->points.capacity();
+    size_t target_capacity = m_max_observed_cloud_size * 1.2; // 预留20%缓冲
+
+    // 如果观察到的最大大小超过当前容量的80%，则扩容
+    if (m_max_observed_cloud_size > current_capacity * 0.8 && target_capacity > current_capacity) {
+        try {
+            m_body_cloud_pool->points.reserve(target_capacity);
+            m_world_cloud_pool->points.reserve(target_capacity);
+            m_pool_resize_counter++;
+
+            if (m_builder_config.enable_buffer_monitoring) {
+                RCLCPP_INFO(this->get_logger(),
+                           "内存池自适应调整 #%d: %zu -> %zu 点 (观察到最大: %zu)",
+                           m_pool_resize_counter, current_capacity, target_capacity, m_max_observed_cloud_size);
+            }
+        } catch (const std::exception& e) {
+            RCLCPP_WARN(this->get_logger(), "内存池扩容失败: %s", e.what());
+        }
+    }
+
+    // 每1000次检查重置统计以适应环境变化
+    if (check_counter % 10000 == 0) {
+        m_max_observed_cloud_size = current_cloud_size;
+        if (m_builder_config.enable_buffer_monitoring) {
+            RCLCPP_INFO(this->get_logger(), "重置内存池统计，当前容量: %zu", m_body_cloud_pool->points.capacity());
+        }
+    }
+}
 
 int main(int argc, char **argv)
 {
     rclcpp::init(argc, argv);
-    rclcpp::spin(std::make_shared<LIONode>());
+    auto node = std::make_shared<LIONode>();
+
+    RCLCPP_INFO(node->get_logger(), "🚀 协同增强FAST-LIO2系统启动");
+
+    rclcpp::spin(node);
     rclcpp::shutdown();
     return 0;
 }

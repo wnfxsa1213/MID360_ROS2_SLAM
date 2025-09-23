@@ -52,6 +52,11 @@ struct Config
     V3D t_il = V3D::Zero();
 
     double lidar_cov_inv = 1000.0;
+
+    // 缓冲区管理参数
+    int max_imu_buffer_size = 1000;     // IMU缓冲区最大大小
+    int max_lidar_buffer_size = 50;     // 激光雷达缓冲区最大大小
+    bool enable_buffer_monitoring = true; // 启用缓冲区监控
 };
 
 struct IMUData

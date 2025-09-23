@@ -1,0 +1,43 @@
+imu_topic: /livox/imu
+lidar_topic: /livox/lidar
+body_frame: base_link
+world_frame: odom
+print_time_cost: true
+
+lidar_filter_num: 2        # 降低滤波强度 (4→2，保留更多细节)
+lidar_min_range: 0.5
+# 室内建图优化参数 - 针对室内环境特点调整
+lidar_max_range: 25.0      # 室内检测距离 (80→25m，适合室内空间)
+scan_resolution: 0.03      # 扫描分辨率 (0.05→0.03，提高扫描精度)
+map_resolution: 0.05       # 地图分辨率 (0.08→0.05，提高地图分辨率)
+
+# 性能优化地图管理 - 减小内存占用和计算负载
+cube_len: 200             # 局部地图范围 (400→200m，减少内存占用)
+det_range: 50             # 检测范围 (80→50m，提升计算效率)
+move_thresh: 1.0          # 运动阈值 (1.5→1.0，更频繁删除远程点云)
+# 计算: det_thresh = 1.0 × 50 = 50m (优化性能)
+
+# IMU噪声参数优化 (针对MID360内置IMU)
+na: 0.005          # 加速度计噪声 (降低，MID360精度较好)
+ng: 0.005          # 陀螺仪噪声 (降低)
+nba: 0.0001        # 加速度计偏置噪声 (保持)
+nbg: 0.00005       # 陀螺仪偏置噪声 (稍微降低)
+
+# 防飘移优化: 提升匹配精度和收敛质量
+imu_init_num: 200         # 初始化样本数 (提高至200，确保IMU充分初始化)
+near_search_num: 20       # KNN搜索数 (进一步提高至20，强化点云匹配约束)
+ieskf_max_iter: 8         # IESKF迭代次数 (提高至8，确保充分收敛)
+
+# 点云匹配质量优化
+lidar_cov_scale: 1.0      # 雷达协方差缩放因子 (降低不确定性)
+point_filter_num: 4       # 点云滤波数量 (提高质量)
+converge_thresh: 0.0001   # 收敛阈值 (提高精度要求)
+
+gravity_align: true
+esti_il: false
+
+r_il: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
+t_il: [-0.011, -0.02329, 0.04412]
+
+# 雷达测量置信度优化 - 提高点云匹配权重
+lidar_cov_inv: 2000.0     # 雷达协方差逆值 (1500→2000，提高雷达测量置信度)

@@ -119,7 +119,9 @@ def generate_launch_description():
                 'auto_optimization': True    # 启用自动优化
             }],
             remappings=[
-                ("/coordinator/metrics", "/slam/coordination_metrics")
+                ("/coordinator/metrics", "/slam/coordination_metrics"),
+                ("/fastlio2/lio_odom", "/slam/lio_odom"),
+                ("/fastlio2/performance_metrics", "/slam/performance_metrics")
             ]
         ),
 

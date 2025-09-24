@@ -198,7 +198,7 @@ monitoring:
 # ============================================================================
 pgo:
   # 基本话题配置
-  cloud_topic: "/slam/body_cloud"
+  cloud_topic: "/localizer/filtered_cloud"
   odom_topic: "/slam/lio_odom"
   map_frame: "map"
   local_frame: "lidar"
@@ -244,7 +244,7 @@ hba:
 # ============================================================================
 localizer:
   # 基本话题配置
-  cloud_topic: "/slam/body_cloud"
+  cloud_topic: "/localizer/filtered_cloud"
   odom_topic: "/slam/lio_odom"
   map_frame: "map"
   local_frame: "lidar"

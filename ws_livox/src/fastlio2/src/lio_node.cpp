@@ -35,6 +35,8 @@
 #include <diagnostic_msgs/msg/diagnostic_array.hpp>
 #include <diagnostic_msgs/msg/diagnostic_status.hpp>
 #include <yaml-cpp/yaml.h>
+// 协同优化服务（触发保存前的全局优化）
+#include "interface/srv/trigger_optimization.hpp"
 
 using namespace std::chrono_literals;
 struct NodeConfig
@@ -101,6 +103,9 @@ public:
         m_sync_state_service = this->create_service<interface::srv::SyncState>(
             "fastlio2/sync_state",
             std::bind(&LIONode::syncStateCB, this, std::placeholders::_1, std::placeholders::_2));
+
+        // 协同优化触发客户端
+        m_trigger_opt_client = this->create_client<interface::srv::TriggerOptimization>("/coordinator/trigger_optimization");
 
         // 协同状态发布者
         m_coop_status_pub = this->create_publisher<std_msgs::msg::Float64MultiArray>(
@@ -787,6 +792,8 @@ private:
     rclcpp::Service<interface::srv::UpdatePose>::SharedPtr m_update_pose_service;
     rclcpp::Service<interface::srv::SyncState>::SharedPtr m_sync_state_service;
     rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr m_coop_status_pub;
+    // 协同优化触发客户端（调用协调器）
+    rclcpp::Client<interface::srv::TriggerOptimization>::SharedPtr m_trigger_opt_client;
 
     rclcpp::TimerBase::SharedPtr m_timer;
     StateData m_state_data;

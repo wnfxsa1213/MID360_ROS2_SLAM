@@ -244,7 +244,8 @@ hba:
 # ============================================================================
 localizer:
   # 基本话题配置
-  cloud_topic: "/localizer/filtered_cloud"
+  # 订阅来自FAST-LIO2的原始身体坐标系点云（经cooperative启动重映射为/slam/body_cloud）
+  cloud_topic: "/slam/body_cloud"
   odom_topic: "/slam/lio_odom"
   map_frame: "map"
   local_frame: "lidar"

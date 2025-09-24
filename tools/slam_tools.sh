@@ -386,19 +386,26 @@ case "$1" in
         echo "清理之前的编译文件..."
         rm -rf build install log
         
-        # 检查GTSAM依赖
-        if [ ! -f "/usr/local/lib/cmake/GTSAM/GTSAMConfig.cmake" ]; then
-            echo -e "${RED}❌ GTSAM未安装，无法编译PGO和HBA包${NC}"
-            echo -e "${YELLOW}请先运行: $0 gtsam${NC}"
-            exit 1
+        # 检查GTSAM依赖（可选，仅影响PGO/HBA）
+        HAS_GTSAM=0
+        if [ -f "/usr/local/lib/cmake/GTSAM/GTSAMConfig.cmake" ]; then
+            HAS_GTSAM=1
+            echo -e "${GREEN}✓ 检测到GTSAM，启用PGO/HBA编译${NC}"
+        else
+            echo -e "${YELLOW}⚠️  未检测到GTSAM，将跳过PGO/HBA编译${NC}"
+            echo -e "${YELLOW}   如需编译PGO/HBA，请先运行: $0 gtsam${NC}"
         fi
         
         # 按依赖顺序编译所有包
         echo "正在编译所有SLAM组件..."
         
         # 核心包（必需）
-        core_packages=("interface" "livox_ros_driver2" "fastlio2")
-        extended_packages=("pgo" "hba" "localizer")
+        core_packages=("interface" "livox_ros_driver2" "fastlio2" "localizer" "cooperation")
+        # 可选包（需要GTSAM）
+        extended_packages=()
+        if [ $HAS_GTSAM -eq 1 ]; then
+            extended_packages=("pgo" "hba")
+        fi
 
         # 检查动态过滤器是否已集成
         if [ -f "src/localizer/src/localizers/dynamic_object_filter.cpp" ]; then
@@ -412,7 +419,7 @@ case "$1" in
             pkg="${core_packages[$i]}"
             step=$((i + 1))
             echo -e "${CYAN}[${step}/7] 编译 ${pkg}...${NC}"
-            colcon build --packages-select "${pkg}" --cmake-args -DCMAKE_BUILD_TYPE=Release
+            colcon build --symlink-install --packages-select "${pkg}" --cmake-args -DCMAKE_BUILD_TYPE=Release
             if [ $? -ne 0 ]; then
                 echo -e "${RED}❌ ${pkg}编译失败${NC}"
                 echo -e "${YELLOW}提示：可能存在依赖问题，请检查错误信息${NC}"
@@ -424,24 +431,28 @@ case "$1" in
         done
         
         # 编译扩展包
-        for i in "${!extended_packages[@]}"; do
-            pkg="${extended_packages[$i]}"
-            step=$((i + 4))  # 继续计数
-            echo -e "${CYAN}[${step}/7] 编译 ${pkg}...${NC}"
-            colcon build --packages-select "${pkg}" --cmake-args -DCMAKE_BUILD_TYPE=Release
-            if [ $? -ne 0 ]; then
-                echo -e "${YELLOW}⚠️  ${pkg}编译失败，但不影响基本功能${NC}"
-            else
-                echo -e "${GREEN}✓ ${pkg}编译成功${NC}"
-            fi
-        done
+        if [ ${#extended_packages[@]} -gt 0 ]; then
+            for i in "${!extended_packages[@]}"; do
+                pkg="${extended_packages[$i]}"
+                step=$((i + 5))  # 继续计数（前面4个核心包）
+                echo -e "${CYAN}[${step}/7] 编译 ${pkg}...${NC}"
+                colcon build --symlink-install --packages-select "${pkg}" --cmake-args -DCMAKE_BUILD_TYPE=Release
+                if [ $? -ne 0 ]; then
+                    echo -e "${YELLOW}⚠️  ${pkg}编译失败，但不影响基本功能${NC}"
+                else
+                    echo -e "${GREEN}✓ ${pkg}编译成功${NC}"
+                fi
+            done
+        else
+            echo -e "${YELLOW}⏭  跳过PGO/HBA编译（GTSAM未安装）${NC}"
+        fi
         
         echo -e "${GREEN}🎉 完整SLAM系统编译完成！${NC}"
         echo ""
         echo -e "${YELLOW}完整编译结果验证:${NC}"
         
         # 验证所有包
-        all_packages=("interface" "livox_ros_driver2" "fastlio2" "pgo" "hba" "localizer")
+        all_packages=("interface" "livox_ros_driver2" "fastlio2" "localizer" "cooperation" "pgo" "hba")
         for pkg in "${all_packages[@]}"; do
             if [ -d "install/${pkg}" ]; then
                 echo -e "  ${pkg}: ${GREEN}✓${NC} 已安装"

@@ -71,7 +71,7 @@ frames:
 topics:
   # 输入话题
   imu: "/livox/imu"
-  lidar: "/livox/lidar"
+  lidar: "/livox/lidar_filtered"  # FastLIO2使用过滤后的点云数据
 
   # SLAM输出话题（与协同启动的重映射一致）
   odometry: "/slam/lio_odom"
@@ -269,8 +269,8 @@ localizer:
   # 基于多帧时间一致性和几何特征分析的混合动态对象检测算法
   # 用于在SLAM过程中实时过滤动态物体，提高定位和建图精度
   dynamic_filter:
-    enable: true                    # 是否启用动态过滤器功能
-                                    # true: 启用过滤，false: 禁用（直接传递原始点云）
+    enable: false                   # 禁用Localizer动态过滤（FastLIO2输入已使用专用过滤桥接节点过滤）
+                                    # 避免重复过滤，保持数据流一致性
 
     publish_stats: true             # 是否发布过滤统计信息到ROS话题
                                     # 包括过滤点数、处理时间、动态对象数量等性能指标

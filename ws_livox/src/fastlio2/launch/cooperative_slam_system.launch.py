@@ -43,6 +43,10 @@ def generate_launch_description():
         FindPackageShare("localizer"), "config", "localizer.yaml"
     ])
 
+    point_cloud_filter_config_path = PathJoinSubstitution([
+        FindPackageShare("point_cloud_filter"), "config", "point_cloud_filter.yaml"
+    ])
+
     # RViz配置
     rviz_cfg = PathJoinSubstitution([
         FindPackageShare("fastlio2"), "rviz", "enhanced_fastlio2.rviz"
@@ -83,6 +87,23 @@ def generate_launch_description():
                 'frame_id': 'livox_frame',
                 'user_config_path': livox_config_path,
                 'cmdline_input_bd_code': 'livox0000000001',
+                'use_sim_time': use_sim_time,
+            }],
+            condition=UnlessCondition(use_bag)
+        ),
+
+        # === 点云过滤桥接节点 ===
+        launch_ros.actions.Node(
+            package="point_cloud_filter",
+            executable="point_cloud_filter_bridge_node",
+            name="point_cloud_filter_bridge",
+            output="screen",
+            parameters=[{
+                "config_path": point_cloud_filter_config_path,
+                "input_topic": "/livox/lidar",
+                "output_topic": "/livox/lidar_filtered",
+                "debug_enabled": False,
+                "max_processing_hz": 10.0,
                 'use_sim_time': use_sim_time,
             }],
             condition=UnlessCondition(use_bag)

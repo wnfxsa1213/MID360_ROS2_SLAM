@@ -400,7 +400,7 @@ case "$1" in
         echo "正在编译所有SLAM组件..."
         
         # 核心包（必需）
-        core_packages=("interface" "livox_ros_driver2" "fastlio2" "localizer" "cooperation")
+        core_packages=("interface" "livox_ros_driver2" "point_cloud_filter" "fastlio2" "localizer" "cooperation")
         # 可选包（需要GTSAM）
         extended_packages=()
         if [ $HAS_GTSAM -eq 1 ]; then
@@ -452,7 +452,7 @@ case "$1" in
         echo -e "${YELLOW}完整编译结果验证:${NC}"
         
         # 验证所有包
-        all_packages=("interface" "livox_ros_driver2" "fastlio2" "localizer" "cooperation" "pgo" "hba")
+        all_packages=("interface" "livox_ros_driver2" "point_cloud_filter" "fastlio2" "localizer" "cooperation" "pgo" "hba")
         for pkg in "${all_packages[@]}"; do
             if [ -d "install/${pkg}" ]; then
                 echo -e "  ${pkg}: ${GREEN}✓${NC} 已安装"
@@ -677,7 +677,29 @@ case "$1" in
             ros2 service call /coordinator/trigger_optimization interface/srv/TriggerOptimization "{optimization_level: 2, include_pgo: true, include_hba: true, include_localizer: true, drift_threshold: 0.1, emergency_mode: false}" --timeout 30 2>/dev/null || echo "优化触发完成"
 
             echo -e "${CYAN}等待优化完成...${NC}"
-            sleep 5
+            # 智能等待：监控优化状态直到完成
+            optimization_timeout=60  # 最长等待60秒
+            for i in $(seq 1 $optimization_timeout); do
+                # 检查多个指标确定优化状态
+                if timeout 2s ros2 topic echo /slam/coordination_metrics --once 2>/dev/null | grep -q "optimization_active.*false" 2>/dev/null; then
+                    echo -e "${GREEN}优化已完成 (协调器状态)${NC}"
+                    break
+                elif timeout 2s ros2 topic echo /fastlio2/cooperation_status --once 2>/dev/null | grep -q "data.*0.0" 2>/dev/null; then
+                    echo -e "${GREEN}优化已完成 (FastLIO2状态)${NC}"
+                    break
+                elif [ $i -gt 30 ]; then
+                    # 超过30秒后降低检查频率
+                    echo -e "${BLUE}继续等待优化完成... (${i}/${optimization_timeout}秒)${NC}"
+                    sleep 3
+                else
+                    echo -e "${BLUE}优化进行中... (${i}/${optimization_timeout}秒)${NC}"
+                    sleep 1
+                fi
+            done
+            
+            # 额外等待2秒确保稳定
+            echo -e "${CYAN}稳定等待...${NC}"
+            sleep 2
         fi
         
         # 确保saved_maps目录存在

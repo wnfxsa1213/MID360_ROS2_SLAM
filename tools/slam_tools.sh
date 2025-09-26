@@ -399,8 +399,8 @@ case "$1" in
         # 按依赖顺序编译所有包
         echo "正在编译所有SLAM组件..."
         
-        # 核心包（必需）
-        core_packages=("interface" "livox_ros_driver2" "point_cloud_filter" "fastlio2" "localizer" "cooperation")
+        # 核心包（必需）- 按依赖顺序排列
+        core_packages=("interface" "livox_ros_driver2" "localizer" "point_cloud_filter" "fastlio2" "cooperation")
         # 可选包（需要GTSAM）
         extended_packages=()
         if [ $HAS_GTSAM -eq 1 ]; then
@@ -418,7 +418,7 @@ case "$1" in
         for i in "${!core_packages[@]}"; do
             pkg="${core_packages[$i]}"
             step=$((i + 1))
-            echo -e "${CYAN}[${step}/7] 编译 ${pkg}...${NC}"
+            echo -e "${CYAN}[${step}/6] 编译 ${pkg}...${NC}"
             colcon build --symlink-install --packages-select "${pkg}" --cmake-args -DCMAKE_BUILD_TYPE=Release
             if [ $? -ne 0 ]; then
                 echo -e "${RED}❌ ${pkg}编译失败${NC}"
@@ -434,8 +434,8 @@ case "$1" in
         if [ ${#extended_packages[@]} -gt 0 ]; then
             for i in "${!extended_packages[@]}"; do
                 pkg="${extended_packages[$i]}"
-                step=$((i + 5))  # 继续计数（前面4个核心包）
-                echo -e "${CYAN}[${step}/7] 编译 ${pkg}...${NC}"
+                step=$((i + 7))  # 继续计数（前面6个核心包）
+                echo -e "${CYAN}[${step}/8] 编译 ${pkg}...${NC}"
                 colcon build --symlink-install --packages-select "${pkg}" --cmake-args -DCMAKE_BUILD_TYPE=Release
                 if [ $? -ne 0 ]; then
                     echo -e "${YELLOW}⚠️  ${pkg}编译失败，但不影响基本功能${NC}"

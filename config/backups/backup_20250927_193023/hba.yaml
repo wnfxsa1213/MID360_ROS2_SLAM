@@ -1,0 +1,15 @@
+# HBA配置文件
+# 由配置生成器自动生成，请勿手动修改
+# 生成时间: 2025-09-27 19:25:51
+# 主配置文件: /home/tianyu/codes/Mid360map/config/master_config.yaml
+
+ba_max_iter: 10
+down_sample: 0.1
+hba_iter: 5
+max_layer: 3
+min_point_num: 10
+plane_thresh: 0.01
+scan_resolution: 0.1
+stride: 10
+voxel_size: 0.5
+window_size: 20

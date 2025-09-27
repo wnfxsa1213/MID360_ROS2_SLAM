@@ -2,6 +2,7 @@
 #include <nav_msgs/msg/odometry.hpp>
 #include <sensor_msgs/msg/point_cloud2.hpp>
 #include <geometry_msgs/msg/pose_stamped.hpp>
+#include <geometry_msgs/msg/pose_array.hpp>
 #include <geometry_msgs/msg/point.hpp>
 #include <tf2_ros/transform_broadcaster.h>
 #include <message_filters/subscriber.h>
@@ -15,6 +16,7 @@
 #include "pgos/commons.h"
 #include "pgos/simple_pgo.h"
 #include "interface/srv/save_maps.hpp"
+#include "interface/srv/get_optimized_pose.hpp"
 #include <pcl/io/io.h>
 #include <fstream>
 #include <yaml-cpp/yaml.h>
@@ -53,7 +55,14 @@ public:
         m_sync->setAgePenalty(0.1);
         m_sync->registerCallback(std::bind(&PGONode::syncCB, this, std::placeholders::_1, std::placeholders::_2));
         m_timer = this->create_wall_timer(50ms, std::bind(&PGONode::timerCB, this));
-        m_save_map_srv = this->create_service<interface::srv::SaveMaps>("pgo/save_maps", std::bind(&PGONode::saveMapsCB, this, std::placeholders::_1, std::placeholders::_2));
+        m_save_map_srv = this->create_service<interface::srv::SaveMaps>(
+            "pgo/save_maps",
+            std::bind(&PGONode::saveMapsCB, this, std::placeholders::_1, std::placeholders::_2));
+
+        // 提供优化结果查询服务（供协调器获取位姿与轨迹）
+        m_get_optimized_pose_srv = this->create_service<interface::srv::GetOptimizedPose>(
+            "pgo/get_optimized_pose",
+            std::bind(&PGONode::getOptimizedPoseCB, this, std::placeholders::_1, std::placeholders::_2));
     }
 
     void loadParameters()
@@ -81,6 +90,23 @@ public:
         m_pgo_config.loop_submap_half_range = config["loop_submap_half_range"].as<int>();
         m_pgo_config.submap_resolution = config["submap_resolution"].as<double>();
         m_pgo_config.min_loop_detect_duration = config["min_loop_detect_duration"].as<double>();
+
+        // 可选：高级几何验证与约束管理参数（存在则覆盖默认值）
+        if (config["min_inlier_ratio"]) {
+            m_pgo_config.min_inlier_ratio = config["min_inlier_ratio"].as<double>();
+        }
+        if (config["icp_max_distance"]) {
+            m_pgo_config.icp_max_distance = config["icp_max_distance"].as<double>();
+        }
+        if (config["max_candidates"]) {
+            m_pgo_config.max_candidates = config["max_candidates"].as<int>();
+        }
+        if (config["min_index_separation"]) {
+            m_pgo_config.min_index_separation = config["min_index_separation"].as<int>();
+        }
+        if (config["inlier_threshold"]) {
+            m_pgo_config.inlier_threshold = config["inlier_threshold"].as<double>();
+        }
     }
     void syncCB(const sensor_msgs::msg::PointCloud2::ConstSharedPtr &cloud_msg, const nav_msgs::msg::Odometry::ConstSharedPtr &odom_msg)
     {
@@ -292,10 +318,64 @@ private:
     rclcpp::TimerBase::SharedPtr m_timer;
     rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr m_loop_marker_pub;
     rclcpp::Service<interface::srv::SaveMaps>::SharedPtr m_save_map_srv;
+    rclcpp::Service<interface::srv::GetOptimizedPose>::SharedPtr m_get_optimized_pose_srv;
     message_filters::Subscriber<sensor_msgs::msg::PointCloud2> m_cloud_sub;
     message_filters::Subscriber<nav_msgs::msg::Odometry> m_odom_sub;
     std::shared_ptr<tf2_ros::TransformBroadcaster> m_tf_broadcaster;
     std::shared_ptr<message_filters::Synchronizer<message_filters::sync_policies::ApproximateTime<sensor_msgs::msg::PointCloud2, nav_msgs::msg::Odometry>>> m_sync;
+
+    void getOptimizedPoseCB(const std::shared_ptr<interface::srv::GetOptimizedPose::Request> /*request*/,
+                            std::shared_ptr<interface::srv::GetOptimizedPose::Response> response)
+    {
+        std::lock_guard<std::mutex>(m_state.message_mutex);
+        if (m_pgo->keyPoses().empty()) {
+            response->success = false;
+            response->message = "No key poses available";
+            return;
+        }
+
+        // 使用最后一个关键帧的全局位姿作为当前优化估计
+        const auto& last = m_pgo->keyPoses().back();
+        geometry_msgs::msg::PoseWithCovariance pose;
+        pose.pose.position.x = last.t_global.x();
+        pose.pose.position.y = last.t_global.y();
+        pose.pose.position.z = last.t_global.z();
+        Eigen::Quaterniond q(last.r_global);
+        pose.pose.orientation.w = q.w();
+        pose.pose.orientation.x = q.x();
+        pose.pose.orientation.y = q.y();
+        pose.pose.orientation.z = q.z();
+
+        // 简单地根据历史回环数量估计一个优化分数（占位实现）
+        double score = 1.0;
+        if (!m_pgo->historyPairs().empty()) {
+            // 回环越多，认为优化可靠性越高
+            score = std::min(1.0, 0.5 + 0.05 * static_cast<double>(m_pgo->historyPairs().size()));
+        }
+
+        // 填充优化后的轨迹（所有关键帧）
+        geometry_msgs::msg::PoseArray traj;
+        traj.header.stamp = this->now();
+        traj.header.frame_id = m_node_config.map_frame;
+        for (const auto& kp : m_pgo->keyPoses()) {
+            geometry_msgs::msg::Pose p;
+            p.position.x = kp.t_global.x();
+            p.position.y = kp.t_global.y();
+            p.position.z = kp.t_global.z();
+            Eigen::Quaterniond qq(kp.r_global);
+            p.orientation.w = qq.w();
+            p.orientation.x = qq.x();
+            p.orientation.y = qq.y();
+            p.orientation.z = qq.z();
+            traj.poses.push_back(p);
+        }
+
+        response->success = true;
+        response->message = "OK";
+        response->optimized_pose = pose;
+        response->optimized_trajectory = traj;
+        response->optimization_score = score;
+    }
 };
 
 int main(int argc, char **argv)

@@ -5,6 +5,7 @@
 #include "interface/srv/update_pose.hpp"
 #include "interface/srv/sync_state.hpp"
 #include "interface/srv/trigger_optimization.hpp"
+#include "interface/srv/get_optimized_pose.hpp"
 #include "interface/srv/refine_map.hpp"
 #include "interface/srv/relocalize.hpp"
 #include <queue>
@@ -74,6 +75,7 @@ private:
     rclcpp::Client<interface::srv::Relocalize>::SharedPtr m_localizer_client;
     rclcpp::Client<interface::srv::UpdatePose>::SharedPtr m_fastlio_client;
     rclcpp::Client<interface::srv::SyncState>::SharedPtr m_sync_client;
+    rclcpp::Client<interface::srv::GetOptimizedPose>::SharedPtr m_pgo_status_client;
 
     rclcpp::Service<interface::srv::TriggerOptimization>::SharedPtr m_trigger_service;
 
@@ -120,6 +122,7 @@ private:
         m_localizer_client = this->create_client<interface::srv::Relocalize>("localizer/relocalize");
         m_fastlio_client = this->create_client<interface::srv::UpdatePose>("fastlio2/update_pose");
         m_sync_client = this->create_client<interface::srv::SyncState>("fastlio2/sync_state");
+        m_pgo_status_client = this->create_client<interface::srv::GetOptimizedPose>("pgo/get_optimized_pose");
 
         RCLCPP_INFO(this->get_logger(), "✅ 协同客户端初始化完成");
     }
@@ -266,15 +269,39 @@ private:
     {
         RCLCPP_INFO(this->get_logger(), "🔄 执行PGO优化...");
 
-        // 等待PGO优化完成并获取结果
-        std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+        // 主动查询PGO优化结果（关键帧优化位姿与轨迹）
+        if (!m_pgo_status_client->wait_for_service(2s)) {
+            RCLCPP_WARN(this->get_logger(), "PGO状态服务不可用，进行被动同步");
+            requestStateSync("pgo_node", 0);
+            finalizeOptimization(true);
+            return;
+        }
 
-        // 请求状态同步
-        requestStateSync("pgo_node", 0);
+        auto req = std::make_shared<interface::srv::GetOptimizedPose::Request>();
+        try {
+            auto future = m_pgo_status_client->async_send_request(req);
+            auto resp = future.get();
+            if (resp && resp->success) {
+                // 将优化位姿回写至FAST-LIO2（平滑更新）
+                pushUpdatePoseToLIO(resp->optimized_pose, resp->optimization_score, "pgo_node");
 
-        m_metrics.optimization_in_progress = false;
-        m_metrics.last_optimization_time = this->get_clock()->now();
-        m_metrics.successful_optimizations++;
+                // 向FAST-LIO2同步轨迹（便于内部状态/可视化对齐）
+                pushSyncStateToLIO("pgo_node", 0, resp->optimized_trajectory);
+
+                finalizeOptimization(true);
+                return;
+            } else {
+                RCLCPP_WARN(this->get_logger(), "PGO结果无效，进行被动同步");
+                requestStateSync("pgo_node", 0);
+                finalizeOptimization(false);
+                return;
+            }
+        } catch (const std::exception& e) {
+            RCLCPP_ERROR(this->get_logger(), "PGO优化查询异常: %s", e.what());
+            requestStateSync("pgo_node", 0);
+            finalizeOptimization(false);
+            return;
+        }
     }
 
     void executeHBAOptimization(const OptimizationTask& task)
@@ -351,6 +378,55 @@ private:
         } catch (const std::exception& e) {
             RCLCPP_ERROR(this->get_logger(), "状态同步异常: %s", e.what());
         }
+    }
+
+    void pushUpdatePoseToLIO(const geometry_msgs::msg::PoseWithCovariance& optimized_pose,
+                              double score,
+                              const std::string& source)
+    {
+        if (!m_fastlio_client->wait_for_service(2s)) {
+            RCLCPP_WARN(this->get_logger(), "FAST-LIO2位姿更新服务不可用");
+            return;
+        }
+        auto req = std::make_shared<interface::srv::UpdatePose::Request>();
+        req->optimized_pose = optimized_pose;
+        req->header.stamp = this->now();
+        req->reset_covariance = false;
+        req->optimization_score = score;
+        req->source_component = source;
+        try {
+            auto fut = m_fastlio_client->async_send_request(req);
+            (void)fut.get();
+        } catch (...) {
+        }
+    }
+
+    void pushSyncStateToLIO(const std::string& component,
+                            int opt_type,
+                            const geometry_msgs::msg::PoseArray& traj)
+    {
+        if (!m_sync_client->wait_for_service(2s)) {
+            RCLCPP_WARN(this->get_logger(), "状态同步服务不可用");
+            return;
+        }
+        auto req = std::make_shared<interface::srv::SyncState::Request>();
+        req->component_name = component;
+        req->optimization_type = opt_type;
+        req->optimized_trajectory = traj;
+        req->force_update = true;
+        try {
+            auto fut = m_sync_client->async_send_request(req);
+            (void)fut.get();
+        } catch (...) {
+        }
+    }
+
+    void finalizeOptimization(bool success)
+    {
+        m_metrics.optimization_in_progress = false;
+        m_metrics.last_optimization_time = this->get_clock()->now();
+        if (success) m_metrics.successful_optimizations++;
+        else m_metrics.failed_optimizations++;
     }
 
     // 回调函数

@@ -1,21 +1,26 @@
 #!/usr/bin/env python3
 """
-地图精细化主工具
+地图精细化主工具（重构版）
 
 集成多种算法提升室内建图精度：
 - 法向量ICP增强配准算法
 - 平面结构保护
-- 边缘特征强化  
+- 边缘特征强化
 - 几何约束优化
 - 点云去噪
 - 表面重建
 - 细节保护过滤
 - 密度均匀化
 
-使用方法:
-    python3 map_refinement.py input.pcd --output refined.pcd
-    python3 map_refinement.py input.pcd --pipeline full --quality-report
-    python3 map_refinement.py batch_refine *.pcd --output-dir refined/
+新特性：
+- 明确的子命令：refine（单文件）、batch（批处理）、report（质量报告）
+- 兼容旧调用："batch_refine" 仍可用（等价于子命令 batch）
+- 支持 --dry-run、--overwrite、--threads、--save-config
+
+使用示例：
+  python3 map_refinement.py refine input.pcd -o refined.pcd --pipeline full --quality-report
+  python3 map_refinement.py batch "saved_maps/*.pcd" --output-dir refined/ --pipeline basic
+  python3 map_refinement.py report refined.pcd --input input.pcd
 """
 
 import os
@@ -206,7 +211,8 @@ class MapRefinementPipeline:
             raise
             
     def process_single_cloud(self, input_path: str, output_path: str,
-                           pipeline: str = "full", save_intermediate: bool = False) -> Dict:
+                           pipeline: str = "full", save_intermediate: bool = False,
+                           overwrite: bool = False, dry_run: bool = False) -> Dict:
         """
         处理单个点云文件
         
@@ -234,7 +240,20 @@ class MapRefinementPipeline:
         # 创建输出目录
         output_dir = os.path.dirname(output_path)
         if output_dir and not os.path.exists(output_dir):
-            os.makedirs(output_dir)
+            os.makedirs(output_dir, exist_ok=True)
+
+        # 已存在输出且未要求覆盖
+        if os.path.exists(output_path) and not overwrite:
+            logger.info(f"输出已存在且未指定 --overwrite，跳过: {output_path}")
+            return {'success': True, 'skipped': True, 'output_file': output_path,
+                    'processing_time': 0.0, 'original_points': original_info['num_points'],
+                    'final_points': None, 'pipeline': pipeline, 'processing_results': {}}
+
+        if dry_run:
+            logger.info("dry-run 模式：仅检查输入输出与配置，不执行计算")
+            return {'success': True, 'dry_run': True, 'output_file': output_path,
+                    'processing_time': 0.0, 'original_points': original_info['num_points'],
+                    'final_points': None, 'pipeline': pipeline, 'processing_results': {}}
             
         # 根据管道类型选择处理步骤
         processing_results = {}
@@ -436,8 +455,9 @@ class MapRefinementPipeline:
         PointCloudIO.save_point_cloud(pcd, intermediate_path)
         logger.debug(f"保存中间结果: {intermediate_path}")
         
-    def batch_process(self, input_pattern: str, output_dir: str, 
-                     pipeline: str = "full") -> Dict:
+    def batch_process(self, input_pattern: str, output_dir: str,
+                     pipeline: str = "full", overwrite: bool = False,
+                     dry_run: bool = False) -> Dict:
         """
         批量处理点云文件
         
@@ -462,7 +482,7 @@ class MapRefinementPipeline:
         
         # 创建输出目录
         if not os.path.exists(output_dir):
-            os.makedirs(output_dir)
+            os.makedirs(output_dir, exist_ok=True)
             
         # 批量处理
         results = []
@@ -477,7 +497,8 @@ class MapRefinementPipeline:
             output_file = os.path.join(output_dir, f"{name_without_ext}_refined.pcd")
             
             # 处理单个文件
-            result = self.process_single_cloud(input_file, output_file, pipeline)
+            result = self.process_single_cloud(input_file, output_file, pipeline,
+                                               overwrite=overwrite, dry_run=dry_run)
             result['input_file'] = input_file
             result['output_file'] = output_file
             results.append(result)
@@ -599,95 +620,136 @@ class MapRefinementPipeline:
             
         return metrics
 
+def _apply_cli_overrides(pipeline: MapRefinementPipeline, denoising_mode: Optional[str], threads: Optional[int], save_config_path: Optional[str]):
+    if denoising_mode:
+        if 'noise_reduction' not in pipeline.config:
+            pipeline.config['noise_reduction'] = {}
+        if 'adaptive_denoising' not in pipeline.config['noise_reduction']:
+            pipeline.config['noise_reduction']['adaptive_denoising'] = {}
+        pipeline.config['noise_reduction']['adaptive_denoising']['mode'] = denoising_mode
+        logger.info(f"使用命令行指定的去噪模式: {denoising_mode}")
+        pipeline.noise_reducer = NoiseReducer(pipeline.config.get('noise_reduction', {}))
+
+    if threads and threads > 0:
+        perf = pipeline.config.setdefault('performance', {})
+        perf['num_threads'] = threads
+        os.environ["OMP_NUM_THREADS"] = str(threads)
+        os.environ["OPEN3D_CPU_THREADS"] = str(threads)
+        logger.info(f"设置线程数: {threads}")
+
+    if save_config_path:
+        try:
+            Path(save_config_path).parent.mkdir(parents=True, exist_ok=True)
+            with open(save_config_path, 'w', encoding='utf-8') as f:
+                json.dump(pipeline.config, f, indent=2, ensure_ascii=False)
+            logger.info(f"已保存有效配置到: {save_config_path}")
+        except Exception as e:
+            logger.warning(f"保存配置失败: {e}")
+
+
 def main():
     """主函数"""
     parser = argparse.ArgumentParser(description='地图精细化工具')
-    parser.add_argument('input', help='输入点云文件或批处理模式(batch_refine)')
-    parser.add_argument('files', nargs='*', help='批处理模式下的输入文件')
-    parser.add_argument('--output', '-o', help='输出文件路径')
-    parser.add_argument('--output-dir', help='批处理模式下的输出目录')
+    subparsers = parser.add_subparsers(dest='command')
+
+    # 共用选项
     parser.add_argument('--config', help='配置文件路径')
     parser.add_argument('--pipeline', default='full',
                        choices=['full', 'basic', 'denoise', 'structure', 'edges', 'geometry', 'surface', 'details', 'density', 'custom'],
                        help='处理管道类型')
     parser.add_argument('--denoising-mode', default=None,
                        choices=['conservative', 'balanced', 'aggressive'],
-                       help='去噪模式: conservative(保守,保留更多细节), balanced(平衡,推荐), aggressive(激进,严格去噪)')
-    parser.add_argument('--save-intermediate', action='store_true', help='保存中间结果')
-    parser.add_argument('--quality-report', action='store_true', help='生成质量评估报告')
+                       help='去噪模式覆盖')
+    parser.add_argument('--threads', type=int, default=None, help='覆盖线程数')
+    parser.add_argument('--save-config', help='将最终生效的配置保存到该路径(JSON)')
     parser.add_argument('--verbose', '-v', action='store_true', help='详细输出')
-    
+
+    # refine 子命令
+    p_refine = subparsers.add_parser('refine', help='处理单个点云')
+    p_refine.add_argument('input', help='输入点云文件')
+    p_refine.add_argument('--output', '-o', help='输出文件路径')
+    p_refine.add_argument('--save-intermediate', action='store_true', help='保存中间结果')
+    p_refine.add_argument('--quality-report', action='store_true', help='生成质量评估报告')
+    p_refine.add_argument('--overwrite', action='store_true', help='覆盖已存在的输出')
+    p_refine.add_argument('--dry-run', action='store_true', help='不执行，仅检查')
+
+    # batch 子命令
+    p_batch = subparsers.add_parser('batch', help='批量处理点云（通配符）')
+    p_batch.add_argument('pattern', help='输入文件通配符，如 "saved_maps/*.pcd"')
+    p_batch.add_argument('--output-dir', required=True, help='输出目录')
+    p_batch.add_argument('--overwrite', action='store_true', help='覆盖已存在的输出')
+    p_batch.add_argument('--dry-run', action='store_true', help='不执行，仅检查')
+
+    # report 子命令
+    p_report = subparsers.add_parser('report', help='生成质量评估报告')
+    p_report.add_argument('output', help='精细化后的点云文件')
+    p_report.add_argument('--input', required=True, help='原始点云文件')
+
+    # 兼容旧调用：batch_refine *.pcd --output-dir
+    parser.add_argument('legacy', nargs='?', help=argparse.SUPPRESS)
+    parser.add_argument('legacy_files', nargs='*', help=argparse.SUPPRESS)
+
     args = parser.parse_args()
-    
+
     # 设置日志级别
     if args.verbose:
         logging.getLogger().setLevel(logging.DEBUG)
-        
+
     try:
-        # 初始化处理管道
-        pipeline = MapRefinementPipeline(args.config)
+        pipe = MapRefinementPipeline(getattr(args, 'config', None))
+        _apply_cli_overrides(pipe, getattr(args, 'denoising_mode', None), getattr(args, 'threads', None), getattr(args, 'save_config', None))
 
-        # 应用命令行去噪模式覆盖
-        if args.denoising_mode:
-            if 'noise_reduction' not in pipeline.config:
-                pipeline.config['noise_reduction'] = {}
-            if 'adaptive_denoising' not in pipeline.config['noise_reduction']:
-                pipeline.config['noise_reduction']['adaptive_denoising'] = {}
-
-            pipeline.config['noise_reduction']['adaptive_denoising']['mode'] = args.denoising_mode
-            logger.info(f"使用命令行指定的去噪模式: {args.denoising_mode}")
-
-            # 重新初始化去噪器以应用新配置
-            pipeline.noise_reducer = NoiseReducer(pipeline.config.get('noise_reduction', {}))
-
-        if args.input == 'batch_refine':
-            # 批处理模式
-            if not args.files:
-                logger.error("批处理模式需要指定输入文件")
+        # 旧式调用兼容：batch_refine
+        if getattr(args, 'legacy', None) == 'batch_refine':
+            files = getattr(args, 'legacy_files', [])
+            if not files:
+                logger.error("批处理模式需要指定输入文件通配符")
                 return 1
-                
-            if not args.output_dir:
-                logger.error("批处理模式需要指定输出目录")
-                return 1
-                
-            # 处理多个文件模式
-            input_pattern = ' '.join(args.files)
-            result = pipeline.batch_process(input_pattern, args.output_dir, args.pipeline)
-            
-            if result['success']:
-                print(f"批处理完成: {result['successful_files']}/{result['total_files']} 文件成功")
-                return 0
-            else:
-                print(f"批处理失败: {result.get('error', 'unknown error')}")
-                return 1
-                
-        else:
-            # 单文件处理模式
-            if not args.output:
-                # 自动生成输出文件名
-                input_path = Path(args.input)
-                args.output = str(input_path.parent / f"{input_path.stem}_refined{input_path.suffix}")
-                
-            result = pipeline.process_single_cloud(
-                args.input, args.output, args.pipeline, args.save_intermediate
-            )
-            
-            if result['success']:
-                print(f"处理完成: {args.input} -> {args.output}")
+            pattern = ' '.join(files)
+            out_dir = getattr(args, 'output_dir', None) or 'refined'
+            res = pipe.batch_process(pattern, out_dir, getattr(args, 'pipeline', 'full'))
+            print(f"批处理完成: {res.get('successful_files', 0)}/{res.get('total_files', 0)} 文件成功")
+            return 0 if res.get('success', False) else 1
+
+        if args.command == 'refine':
+            out = args.output
+            if not out:
+                in_path = Path(args.input)
+                out = str(in_path.parent / f"{in_path.stem}_refined{in_path.suffix}")
+            result = pipe.process_single_cloud(args.input, out, getattr(args, 'pipeline', 'full'),
+                                               getattr(args, 'save_intermediate', False),
+                                               getattr(args, 'overwrite', False),
+                                               getattr(args, 'dry_run', False))
+            if result.get('success') and not result.get('skipped') and not result.get('dry_run'):
+                print(f"处理完成: {args.input} -> {out}")
                 print(f"点数变化: {result['original_points']} -> {result['final_points']}")
                 print(f"处理时间: {result['processing_time']:.1f}s")
-                
-                # 生成质量报告
-                if args.quality_report:
-                    report_path = pipeline.generate_quality_report(args.input, args.output, result)
+                if getattr(args, 'quality_report', False):
+                    report_path = pipe.generate_quality_report(args.input, out, result)
                     if report_path:
                         print(f"质量报告: {report_path}")
-                        
-                return 0
-            else:
-                print(f"处理失败: {result.get('error', 'unknown error')}")
-                return 1
-                
+            elif result.get('skipped'):
+                print(f"跳过（已存在）: {out}")
+            elif result.get('dry_run'):
+                print(f"dry-run: 将输出到 {out}")
+            return 0 if result.get('success') else 1
+
+        elif args.command == 'batch':
+            res = pipe.batch_process(args.pattern, args.output_dir, getattr(args, 'pipeline', 'full'),
+                                     getattr(args, 'overwrite', False), getattr(args, 'dry_run', False))
+            print(f"批处理完成: {res.get('successful_files', 0)}/{res.get('total_files', 0)} 文件成功")
+            return 0 if res.get('success', False) else 1
+
+        elif args.command == 'report':
+            dummy = {'processing_time': 0, 'pipeline': 'unknown', 'processing_results': {}}
+            rpt = pipe.generate_quality_report(args.input, args.output, dummy)
+            print(f"质量报告: {rpt}")
+            return 0 if rpt else 1
+
+        else:
+            parser.print_help()
+            return 0
+
     except Exception as e:
         logger.error(f"程序执行失败: {str(e)}")
         return 1

@@ -1,0 +1,54 @@
+# MID360 启动配置文件
+# 由配置生成器自动生成，请勿手动修改
+# 生成时间: 2025-09-27 11:08:49
+# 主配置文件: /home/tianyu/codes/Mid360map/config/master_config.yaml
+
+network:
+  host_ip: 192.168.1.50
+  lidar_ip: 192.168.1.3
+  gateway: 192.168.1.1
+  netmask: 255.255.255.0
+  interface: enp7s0
+  ports:
+    cmd_data: 56100
+    push_msg: 56200
+    point_data: 56300
+    imu_data: 56400
+    log_data: 56500
+lidar:
+  pcl_data_type: 1
+  publish_freq: 10.0
+  frame_id: livox_frame
+  extrinsic:
+    x: 0.0
+    y: 0.0
+    z: 0.0
+    roll: 0.0
+    pitch: 0.0
+    yaw: 0.0
+rviz:
+  auto_start: true
+  config_file: enhanced_fastlio2.rviz
+  display:
+    pointcloud: true
+    trajectory: true
+    tf_frames: true
+    imu_pose: true
+    diagnostics: true
+rosbag:
+  auto_record: false
+  topics:
+  - /livox/lidar
+  - /livox/imu
+  - /slam/lio_odom
+  - /slam/lio_path
+  - /slam/body_cloud
+  - /tf
+  - /tf_static
+  output_dir: data/rosbags
+  compression_format: zstd
+  max_duration: 0
+debug:
+  log_level: INFO
+  verbose: false
+  performance_monitor: true

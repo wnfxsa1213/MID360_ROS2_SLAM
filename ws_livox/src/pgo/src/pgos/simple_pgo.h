@@ -40,6 +40,12 @@ struct Config
     int loop_submap_half_range = 5;
     double submap_resolution = 0.1;
     double min_loop_detect_duration = 10.0;
+    // 高级几何验证与约束管理新增参数（有默认值，YAML可选覆盖）
+    double min_inlier_ratio = 0.30;      // ICP后几何内点比例最小阈值
+    double icp_max_distance = 2.0;       // ICP最大对应距离（提升鲁棒性）
+    int max_candidates = 5;              // 每次检测最多验证的候选数量
+    int min_index_separation = 10;       // 关键帧索引最小间隔，避免近邻伪回环
+    double inlier_threshold = 0.30;      // 计算内点时的距离阈值(米)
 };
 
 class SimplePGO
@@ -69,10 +75,17 @@ private:
     std::vector<KeyPoseWithCloud> m_key_poses;
     std::vector<std::pair<size_t, size_t>> m_history_pairs;
     std::vector<LoopPair> m_cache_pairs;
+    std::vector<std::pair<size_t,size_t>> m_recent_added_pairs; // 约束去重辅助
     M3D m_r_offset;
     V3D m_t_offset;
     std::shared_ptr<gtsam::ISAM2> m_isam2;
     gtsam::Values m_initial_values;
     gtsam::NonlinearFactorGraph m_graph;
     pcl::IterativeClosestPoint<PointType, PointType> m_icp;
+
+    // 几何验证辅助
+    bool isRecentPair(size_t a, size_t b) const;
+    double computeInlierRatio(const CloudType::Ptr& src_aligned,
+                              const CloudType::Ptr& tgt,
+                              double dist_thresh) const;
 };

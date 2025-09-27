@@ -1,4 +1,5 @@
 #include "simple_pgo.h"
+#include <limits>
 
 SimplePGO::SimplePGO(const Config &config) : m_config(config)
 {
@@ -12,7 +13,7 @@ SimplePGO::SimplePGO(const Config &config) : m_config(config)
     m_t_offset.setZero();
 
     m_icp.setMaximumIterations(50);
-    m_icp.setMaxCorrespondenceDistance(10);
+    m_icp.setMaxCorrespondenceDistance(m_config.icp_max_distance);
     m_icp.setTransformationEpsilon(1e-6);
     m_icp.setEuclideanFitnessEpsilon(1e-6);
     m_icp.setRANSACIterations(0);
@@ -129,43 +130,75 @@ void SimplePGO::searchForLoopPairs()
     if (neighbors == 0)
         return;
 
-    int loop_idx = -1;
-    for (size_t i = 0; i < ids.size(); i++)
+    // 收集候选（按时间间隔与索引间隔过滤）
+    std::vector<int> cand_idxs;
+    cand_idxs.reserve(ids.size());
+    for (size_t i = 0; i < ids.size(); ++i)
     {
         int idx = ids[i];
-        if (std::abs(last_item.time - m_key_poses[idx].time) > m_config.loop_time_tresh)
+        if (idx < 0 || idx >= static_cast<int>(m_key_poses.size()-1)) continue;
+        if (static_cast<int>(cur_idx) - idx < m_config.min_index_separation) continue; // 索引间隔
+        if (std::abs(last_item.time - m_key_poses[idx].time) <= m_config.loop_time_tresh) continue; // 时间隔离
+        cand_idxs.push_back(idx);
+        if (static_cast<int>(cand_idxs.size()) >= m_config.max_candidates) break;
+    }
+
+    if (cand_idxs.empty()) return;
+
+    // 源与目标点云（源仅取当前帧/局部子图）
+    CloudType::Ptr source_cloud = getSubMap(static_cast<int>(cur_idx), 0, m_config.submap_resolution);
+
+    double best_score = std::numeric_limits<double>::infinity();
+    int best_idx = -1;
+    M4F best_tf = M4F::Identity();
+    double best_inlier_ratio = 0.0;
+
+    for (int loop_idx : cand_idxs)
+    {
+        if (isRecentPair(loop_idx, cur_idx)) continue; // 去重
+
+        CloudType::Ptr target_cloud = getSubMap(loop_idx, m_config.loop_submap_half_range, m_config.submap_resolution);
+        CloudType::Ptr aligned(new CloudType);
+
+        m_icp.setMaxCorrespondenceDistance(m_config.icp_max_distance);
+        m_icp.setInputSource(source_cloud);
+        m_icp.setInputTarget(target_cloud);
+        m_icp.align(*aligned);
+
+        if (!m_icp.hasConverged()) continue;
+
+        double fitness = m_icp.getFitnessScore();
+        if (fitness > m_config.loop_score_tresh) continue; // 粗滤
+
+        // 计算内点比例（几何验证）
+        double inlier_ratio = computeInlierRatio(aligned, target_cloud, m_config.inlier_threshold);
+        if (inlier_ratio < m_config.min_inlier_ratio) continue;
+
+        // 组合评分：更小更好（用于噪声建模）
+        double combined = fitness / std::max(1e-3, inlier_ratio);
+        if (combined < best_score)
         {
-            loop_idx = idx;
-            break;
+            best_score = combined;
+            best_idx = loop_idx;
+            best_tf = m_icp.getFinalTransformation();
+            best_inlier_ratio = inlier_ratio;
         }
     }
 
-    if (loop_idx == -1)
-        return;
+    if (best_idx == -1) return;
 
-    CloudType::Ptr target_cloud = getSubMap(loop_idx, m_config.loop_submap_half_range, m_config.submap_resolution);
-    CloudType::Ptr source_cloud = getSubMap(m_key_poses.size() - 1, 0, m_config.submap_resolution);
-    CloudType::Ptr align_cloud(new CloudType);
-
-    m_icp.setInputSource(source_cloud);
-    m_icp.setInputTarget(target_cloud);
-    m_icp.align(*align_cloud);
-
-    if (!m_icp.hasConverged() || m_icp.getFitnessScore() > m_config.loop_score_tresh)
-        return;
-
-    M4F loop_transform = m_icp.getFinalTransformation();
-
+    // 构造并缓存最优回环对
     LoopPair one_pair;
     one_pair.source_id = cur_idx;
-    one_pair.target_id = loop_idx;
-    one_pair.score = m_icp.getFitnessScore();
-    M3D r_refined = loop_transform.block<3, 3>(0, 0).cast<double>() * m_key_poses[cur_idx].r_global;
-    V3D t_refined = loop_transform.block<3, 3>(0, 0).cast<double>() * m_key_poses[cur_idx].t_global + loop_transform.block<3, 1>(0, 3).cast<double>();
-    one_pair.r_offset = m_key_poses[loop_idx].r_global.transpose() * r_refined;
-    one_pair.t_offset = m_key_poses[loop_idx].r_global.transpose() * (t_refined - m_key_poses[loop_idx].t_global);
+    one_pair.target_id = static_cast<size_t>(best_idx);
+    one_pair.score = std::max(1e-4, best_score); // 用于方差缩放
+    M3D r_refined = best_tf.block<3, 3>(0, 0).cast<double>() * m_key_poses[cur_idx].r_global;
+    V3D t_refined = best_tf.block<3, 3>(0, 0).cast<double>() * m_key_poses[cur_idx].t_global + best_tf.block<3, 1>(0, 3).cast<double>();
+    one_pair.r_offset = m_key_poses[best_idx].r_global.transpose() * r_refined;
+    one_pair.t_offset = m_key_poses[best_idx].r_global.transpose() * (t_refined - m_key_poses[best_idx].t_global);
     m_cache_pairs.push_back(one_pair);
     m_history_pairs.emplace_back(one_pair.target_id, one_pair.source_id);
+    m_recent_added_pairs.emplace_back(one_pair.target_id, one_pair.source_id);
 }
 
 void SimplePGO::smoothAndUpdate()
@@ -208,4 +241,35 @@ void SimplePGO::smoothAndUpdate()
     const KeyPoseWithCloud &last_item = m_key_poses.back();
     m_r_offset = last_item.r_global * last_item.r_local.transpose();
     m_t_offset = last_item.t_global - m_r_offset * last_item.t_local;
+}
+
+bool SimplePGO::isRecentPair(size_t a, size_t b) const
+{
+    // 检查是否已存在相同顺序或反向的近似配对，避免重复添加
+    for (const auto& p : m_recent_added_pairs)
+    {
+        if ((p.first == a && p.second == b) || (p.first == b && p.second == a))
+            return true;
+    }
+    return false;
+}
+
+double SimplePGO::computeInlierRatio(const CloudType::Ptr& src_aligned,
+                                     const CloudType::Ptr& tgt,
+                                     double dist_thresh) const
+{
+    if (!src_aligned || !tgt || src_aligned->empty() || tgt->empty()) return 0.0;
+    pcl::KdTreeFLANN<PointType> kdt;
+    kdt.setInputCloud(tgt);
+    int inliers = 0;
+    std::vector<int> nn_idx(1);
+    std::vector<float> nn_dist(1);
+    for (const auto& pt : src_aligned->points)
+    {
+        if (kdt.nearestKSearch(pt, 1, nn_idx, nn_dist) > 0)
+        {
+            if (nn_dist[0] <= dist_thresh * dist_thresh) inliers++;
+        }
+    }
+    return static_cast<double>(inliers) / static_cast<double>(src_aligned->size());
 }

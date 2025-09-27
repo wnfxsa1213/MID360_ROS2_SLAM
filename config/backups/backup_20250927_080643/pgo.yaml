@@ -1,0 +1,24 @@
+# PGO配置文件
+# 由配置生成器自动生成，请勿手动修改
+# 生成时间: 2025-09-25 00:07:34
+# 主配置文件: /home/tianyu/codes/Mid360map/config/master_config.yaml
+
+cloud_topic: /slam/body_cloud
+key_pose_delta_deg: 10
+key_pose_delta_trans: 0.3
+local_frame: lidar
+loop_score_tresh: 0.15
+loop_search_radius: 2.5
+loop_submap_half_range: 5
+loop_time_tresh: 30.0
+map_frame: map
+min_loop_detect_duration: 5.0
+odom_topic: /slam/lio_odom
+submap_resolution: 0.1
+
+# --- 高级几何验证参数（可选，未设置则使用内置默认值） ---
+# min_inlier_ratio: 0.30        # ICP对齐后的几何内点比例阈值
+# icp_max_distance: 2.0         # ICP最大对应距离(米)
+# max_candidates: 5             # 每次最多验证的候选数量
+# min_index_separation: 10      # 关键帧索引最小间隔，避免近邻伪回环
+# inlier_threshold: 0.30        # 计算内点比例时的距离阈值(米)

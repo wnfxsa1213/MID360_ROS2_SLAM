@@ -1,0 +1,9 @@
+# 获取优化后的位姿与轨迹（用于协调器从后端获取结果）
+# 请求：空
+---
+# 响应
+bool success
+string message
+geometry_msgs/PoseWithCovariance optimized_pose
+geometry_msgs/PoseArray optimized_trajectory
+float64 optimization_score

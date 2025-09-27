@@ -21,6 +21,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "srv/UpdatePose.srv"
   "srv/SyncState.srv"
   "srv/TriggerOptimization.srv"
+  "srv/GetOptimizedPose.srv"
   "msg/FilterStats.msg"
   DEPENDENCIES std_msgs geometry_msgs builtin_interfaces
 )

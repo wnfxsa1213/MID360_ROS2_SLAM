@@ -35,6 +35,7 @@
   - IMU姿态箭头显示
   - 优化的颜色方案
   - 更好的轨迹可视化
+  - 预置 `Saved Map` 显示，订阅 `/saved_map` 话题，便于快速查看已保存PCD
 
 ## 使用方法
 
@@ -73,6 +74,25 @@ ros2 topic echo /fastlio2/diagnostics
 
 # 或使用图形化界面
 ros2 run rqt_robot_monitor rqt_robot_monitor
+```
+
+### 在RViz中查看已保存地图
+
+1) 将 PCD 文件作为 ROS2 话题发布：
+```bash
+python3 tools/publish_saved_map.py saved_maps/your_map.pcd -t /saved_map -f map
+```
+
+2) 打开增强配置的 RViz（或协同启动已自动打开）：
+```bash
+rviz2 -d ws_livox/src/fastlio2/rviz/enhanced_fastlio2.rviz
+```
+
+3) 在左侧 Displays 中找到 `Saved Map`（已预置），应自动显示 `/saved_map`。
+
+提示：也可使用一键脚本
+```bash
+./tools/slam_tools.sh view saved_maps/your_map.pcd --rviz
 ```
 
 ## 状态指示器
@@ -156,5 +176,6 @@ if (processing_time_ms < YOUR_THRESHOLD) {
 | `/fastlio2/imu_pose_marker` | Marker | ~50Hz | IMU姿态可视化 |
 | `/fastlio2/performance_metrics` | Float64MultiArray | ~50Hz | 性能监控数据 |
 | `/fastlio2/diagnostics` | DiagnosticArray | ~50Hz | 系统诊断信息 |
+| `/saved_map` | PointCloud2 | 1Hz(默认) | 发布保存的PCD地图（工具发布） |
 
 通过这些增强的可视化功能，用户可以更好地监控和调试FAST-LIO2系统，及时发现和解决潜在问题。

@@ -60,7 +60,9 @@ show_help() {
     echo "  $0 [命令]"
     echo ""
     echo -e "${YELLOW}可用命令:${NC}"
-    echo -e "  ${CYAN}start${NC}     - 启动完整SLAM系统 (所有可用组件)"
+    echo -e "  ${CYAN}start${NC}     - 启动SLAM系统；支持子命令:"
+    echo -e "                 start realtime  # 应用实机预设并启动"
+    echo -e "                 start replay --bag <dir> [--rate 1.0] [--loop]  # 应用回放预设并启动"
     echo -e "  ${CYAN}start-basic${NC} - 仅启动基础SLAM (fastlio2)"
     echo -e "  ${CYAN}stop${NC}      - 停止SLAM系统"
     echo -e "  ${CYAN}status${NC}    - 检查系统状态"
@@ -76,7 +78,9 @@ show_help() {
     echo -e "  ${CYAN}network${NC}   - 检查网络配置"
     echo -e "  ${CYAN}log${NC}       - 查看系统日志"
     echo -e "  ${CYAN}rviz${NC}      - 启动RViz可视化"
-    echo -e "  ${CYAN}save${NC}      - 保存当前SLAM地图和轨迹"
+    echo -e "  ${CYAN}save${NC}      - 保存LIO/PGO/HBA数据（地图与轨迹）"
+    echo -e "  ${CYAN}reconstruct${NC} - 使用patches+poses离线重建整图"
+    echo -e "  ${CYAN}preset${NC}    - 应用配置预设 (realtime|replay) 并生成配置"
     echo -e "  ${CYAN}view${NC}      - 查看已保存的地图文件 (支持--rviz参数)"
     echo -e "  ${CYAN}maps${NC}      - 管理已保存的地图"
     echo -e "  ${CYAN}gridmap${NC}   - 将PCD地图转换为栅格地图"
@@ -88,7 +92,7 @@ show_help() {
     echo -e "  ${CYAN}record${NC}    - 开始录制SLAM数据"
     echo -e "  ${CYAN}record-stop${NC} - 停止当前录制"
     echo -e "  ${CYAN}validate${NC}  - 使用录制数据验证SLAM改进效果"
-    echo -e "  ${CYAN}replay${NC}    - 回放录制的SLAM数据"
+    # 已废弃：replay / replay-bag（改用 start replay）
     echo -e "  ${CYAN}bags${NC}      - 管理录制的数据包"
     echo -e "  ${CYAN}gtsam${NC}     - 安装GTSAM库（用于pgo和hba）"
     echo -e "  ${CYAN}deps${NC}      - 检查依赖包状态"
@@ -424,8 +428,114 @@ fi
 
 case "${CMD}" in
     "start")
-        echo -e "${GREEN}启动完整SLAM系统 (所有可用组件)...${NC}"
-        start_cooperative_slam_system
+        SUBCMD="${2-}"
+        if [[ "$SUBCMD" == "realtime" ]]; then
+            echo -e "${CYAN}应用实机预设并启动SLAM系统...${NC}"
+            python3 tools/apply_preset.py --mode realtime || die "应用实机预设失败"
+            start_cooperative_slam_system
+        elif [[ "$SUBCMD" == "replay" ]]; then
+            shift 2 || true
+            BAG=""
+            RATE="1.0"
+            LOOP="false"
+            TOPICS=""
+            REMAPS=()
+            START_OFFSET=""
+            while [[ $# -gt 0 ]]; do
+                case "$1" in
+                    --bag)
+                        BAG="${2-}"; shift 2;;
+                    --rate)
+                        RATE="${2-}"; shift 2;;
+                    --loop)
+                        LOOP="true"; shift;;
+                    --topics)
+                        TOPICS="${2-}"; shift 2;;
+                    --remap)
+                        REMAPS+=("${2-}"); shift 2;;
+                    --start-offset)
+                        START_OFFSET="${2-}"; shift 2;;
+                    *)
+                        echo -e "${YELLOW}忽略未知参数:${NC} $1"; shift;;
+                esac
+            done
+            echo -e "${CYAN}应用回放预设并启动SLAM系统...${NC}"
+            python3 tools/apply_preset.py --mode replay || die "应用回放预设失败"
+            load_ros_env
+            info "=== 启动协同SLAM（回放模式） ==="
+            cmd=(ros2 launch fastlio2 cooperative_slam_system.launch.py use_bag:=true use_sim_time:=true)
+            AUTO_PLAY="true"
+            if [[ -n "$TOPICS" || ${#REMAPS[@]} -gt 0 ]]; then
+                AUTO_PLAY="false"
+            fi
+            if [[ -n "$BAG" && "$AUTO_PLAY" == "true" ]]; then
+                cmd+=(auto_play_bag:=true bag_path:="$BAG" bag_rate:="$RATE")
+                if [[ "$LOOP" == "true" ]]; then
+                    cmd+=(bag_loop:=true)
+                else
+                    cmd+=(bag_loop:=false)
+                fi
+            else
+                cmd+=(auto_play_bag:=false)
+            fi
+            "${cmd[@]}" &
+            SLAM_SYSTEM_PID=$!
+            echo $SLAM_SYSTEM_PID > /tmp/slam_coop.pid
+            ok "🎬 协同SLAM已启动（回放模式），PID=$SLAM_SYSTEM_PID"
+            # 设置退出清理trap
+            cleanup() {
+                if [[ -f /tmp/slam_bag.pid ]]; then
+                    BAGPID=$(cat /tmp/slam_bag.pid 2>/dev/null || echo "");
+                    kill "$BAGPID" 2>/dev/null || true
+                    rm -f /tmp/slam_bag.pid
+                fi
+                if [[ -f /tmp/slam_coop.pid ]]; then
+                    LPID=$(cat /tmp/slam_coop.pid 2>/dev/null || echo "");
+                    kill "$LPID" 2>/dev/null || true
+                    rm -f /tmp/slam_coop.pid
+                fi
+            }
+            trap cleanup EXIT INT TERM
+
+            if [[ -n "$BAG" && "$AUTO_PLAY" == "false" ]]; then
+                # 构造 ros2 bag play 命令，附带 topics 与 remaps
+                bag_cmd=(ros2 bag play "$BAG" --rate "$RATE")
+                if [[ "$LOOP" == "true" ]]; then bag_cmd+=(--loop); fi
+                if [[ -n "$START_OFFSET" ]]; then bag_cmd+=(--start-offset "$START_OFFSET"); fi
+                if [[ -n "$TOPICS" ]]; then
+                    bag_cmd+=(--topics)
+                    # shellcheck disable=SC2206
+                    TOPIC_ARR=($TOPICS)
+                    for t in "${TOPIC_ARR[@]}"; do bag_cmd+=("$t"); done
+                fi
+                # 兜底remap：若 LIO 仍吃 /livox/lidar_filtered，则将原始 /livox/lidar 映射过去
+                LIO_CFG="ws_livox/src/fastlio2/config/lio.yaml"
+                if [[ -f "$LIO_CFG" ]] && grep -q "lidar_topic: /livox/lidar_filtered" "$LIO_CFG"; then
+                    REMAPS+=("/livox/lidar:=/livox/lidar_filtered")
+                    warn "检测到 LIO 订阅 /livox/lidar_filtered，已自动添加 remap: /livox/lidar:=/livox/lidar_filtered"
+                fi
+                for r in "${REMAPS[@]}"; do bag_cmd+=(--remap "$r"); done
+                # 如果未指定 --topics，默认只播 IMU/LiDAR
+                if [[ -z "$TOPICS" ]]; then
+                    bag_cmd+=(--topics /livox/imu /livox/lidar)
+                    warn "未指定 --topics，默认只回放: /livox/imu /livox/lidar"
+                fi
+                info "自动回放: ${bag_cmd[*]}"
+                "${bag_cmd[@]}" &
+                echo $! > /tmp/slam_bag.pid
+            else
+                warn "使用 'ros2 bag play <dir>' 可手动回放；或通过 --bag 自动回放"
+            fi
+        else
+            echo -e "${GREEN}启动完整SLAM系统 (所有可用组件)...${NC}"
+            start_cooperative_slam_system
+        fi
+        ;;
+
+    "replay"|"replay-bag")
+        echo -e "${RED}该命令已废弃:${NC} 请使用:"
+        echo "  $0 start replay --bag <dir> [--rate 1.0] [--loop] [--topics "\"/imu /lidar\""] [--remap from:=to]"
+        exit 1
         ;;
 
     "start-basic")
@@ -584,7 +694,8 @@ case "${CMD}" in
         ;;
     
     "config")
-        case "$2" in
+        SUBCMD="${2-}"
+        case "$SUBCMD" in
             "generate")
                 echo -e "${GREEN}生成统一配置文件...${NC}"
                 echo "================================="
@@ -641,6 +752,10 @@ case "${CMD}" in
                 CONFIG_FILES=(
                     "ws_livox/src/fastlio2/config/lio.yaml:FAST-LIO2配置"
                     "ws_livox/src/livox_ros_driver2/config/MID360_config.json:Livox驱动配置"
+                    "ws_livox/src/point_cloud_filter/config/point_cloud_filter.yaml:过滤桥参数"
+                    "ws_livox/src/localizer/config/localizer.yaml:Localizer配置"
+                    "ws_livox/src/pgo/config/pgo.yaml:PGO配置"
+                    "ws_livox/src/hba/config/hba.yaml:HBA配置"
                     "config/launch_config.yaml:启动配置"
                 )
 
@@ -703,7 +818,7 @@ case "${CMD}" in
                 ;;
 
             *)
-                echo -e "${RED}未知的config子命令: $2${NC}"
+                echo -e "${RED}未知的config子命令: ${SUBCMD}${NC}"
                 echo "使用 '$0 config help' 查看可用命令"
                 exit 1
                 ;;
@@ -777,7 +892,7 @@ case "${CMD}" in
 
     
     "save")
-        echo -e "${YELLOW}保存SLAM地图和轨迹...${NC}"
+        echo -e "${YELLOW}保存SLAM地图与轨迹 (LIO/PGO/HBA)...${NC}"
         
         # 检查ROS环境
         load_ros_env
@@ -804,23 +919,67 @@ case "${CMD}" in
         # 确保saved_maps目录存在
         mkdir -p saved_maps
         
-        # 使用简化保存脚本
-        if [ -f "tools/save_map_simple.py" ]; then
-            echo -e "${CYAN}调用地图保存工具...${NC}"
-            cd tools
-            python3 save_map_simple.py ../saved_maps
-            if [ $? -eq 0 ]; then
-                echo -e "${GREEN}✅ 地图保存完成${NC}"
-                echo -e "${BLUE}保存位置: $(pwd)/../saved_maps${NC}"
-                # 列出保存的文件
-                echo -e "${CYAN}保存的文件:${NC}"
-                ls -la ../saved_maps/*$(date +%Y%m%d)* 2>/dev/null | tail -5
-            else
-                echo -e "${RED}❌ 地图保存失败${NC}"
-            fi
+        # 使用一键保存脚本（优先）
+        if [ -f "tools/save_maps_bundle.py" ]; then
+            echo -e "${CYAN}调用一键保存工具 (LIO/PGO/HBA)...${NC}"
+            python3 tools/save_maps_bundle.py -o saved_maps
+            rc=$?
+        elif [ -f "tools/save_map_simple.py" ]; then
+            echo -e "${YELLOW}回退到简化保存工具 (仅LIO)...${NC}"
+            python3 tools/save_map_simple.py saved_maps
+            rc=$?
         else
-            echo -e "${RED}❌ 地图保存工具不存在${NC}"
-            echo "请确保 tools/save_map_simple.py 文件存在"
+            echo -e "${RED}❌ 未找到保存工具${NC}"
+            echo "请确保存在 tools/save_maps_bundle.py 或 tools/save_map_simple.py"
+            exit 1
+        fi
+
+        if [ ${rc:-1} -eq 0 ]; then
+            echo -e "${GREEN}✅ 保存完成${NC}"
+            echo -e "${CYAN}输出目录内容:${NC}"
+            ls -lt saved_maps | head -10 || true
+            echo -e "${YELLOW}提示:${NC} 可用 '$0 view <map.pcd> --rviz' 在RViz中查看（配置已预置 /saved_map 显示）"
+        else
+            echo -e "${RED}❌ 保存失败${NC}"
+            exit 1
+        fi
+        ;;
+
+    "reconstruct")
+        shift || true
+        # 用法： slam_tools.sh reconstruct --pgo-dir DIR [--poses poses.txt] --output out.pcd [--voxel 0.05]
+        if [ ! -f "tools/reconstruct_map_from_patches.py" ]; then
+            echo -e "${RED}❌ 未找到重建脚本: tools/reconstruct_map_from_patches.py${NC}"
+            exit 1
+        fi
+        if [[ $# -eq 0 ]]; then
+            echo -e "${YELLOW}用法:${NC} $0 reconstruct --pgo-dir <dir> [--poses <poses.txt>] --output <out.pcd> [--downsample-voxel 0.05]"
+            exit 0
+        fi
+        echo -e "${CYAN}离线重建整图...${NC}"
+        python3 tools/reconstruct_map_from_patches.py "$@"
+        ;;
+
+    "preset")
+        # 用法: ./tools/slam_tools.sh preset realtime|replay
+        MODE="${2-}"
+        if [[ -z "$MODE" ]]; then
+            echo -e "${YELLOW}用法:${NC} $0 preset {realtime|replay}"
+            exit 1
+        fi
+        if [[ "$MODE" != "realtime" && "$MODE" != "replay" ]]; then
+            echo -e "${RED}无效模式:${NC} $MODE (应为 realtime 或 replay)"
+            exit 1
+        fi
+        echo -e "${CYAN}应用预设: $MODE ...${NC}"
+        python3 tools/apply_preset.py --mode "$MODE"
+        rc=$?
+        if [ $rc -eq 0 ]; then
+            echo -e "${GREEN}✅ 预设已应用并生成配置完成${NC}"
+            echo -e "${YELLOW}提示:${NC} 重新启动系统以生效: $0 restart"
+        else
+            echo -e "${RED}❌ 预设应用失败 (返回码 $rc)${NC}"
+            exit $rc
         fi
         ;;
     
@@ -902,11 +1061,9 @@ case "${CMD}" in
                 rviz2 -d "$RVIZ_CONFIG" &
                 RVIZ_PID=$!
 
-                echo -e "${YELLOW}💡 在RViz中手动添加PointCloud2显示:${NC}"
-                echo "   1. 点击左下角 'Add' 按钮"
-                echo "   2. 选择 'PointCloud2'"
-                echo "   3. 设置Topic为: $TOPIC_NAME"
-                echo "   4. 设置Fixed Frame为: $FRAME_ID"
+                echo -e "${YELLOW}💡 RViz配置已预置 'Saved Map' 显示:${NC}"
+                echo "   - 话题: $TOPIC_NAME（默认 /saved_map）"
+                echo "   - Fixed Frame: $FRAME_ID（默认 map）"
                 echo ""
                 echo -e "${YELLOW}⚠️  按Ctrl+C停止显示${NC}"
 

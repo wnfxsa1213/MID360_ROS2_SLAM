@@ -1,407 +1,218 @@
-# MID360 SLAM系统统一配置文件
-# 这是系统的主配置文件，所有组件配置都将从此文件生成
-# 解决配置不一致导致的轨迹飘移问题
+## 主配置文件（生成器会读取本文件并下发至各组件）
+# 说明：
+# - 支持在参数旁添加注释（# ...）。配置生成器会忽略注释，不影响正常下发。
+# - 本文件为“单一事实来源”，请勿改动键名结构；仅调整数值即可。
+# - 带有 ↑/↓ 的注释表示调大/调小的效果取舍（性能/精度/鲁棒性）。
 
-# ----------------------------------------------------------------------------
-# 参数调优速查（如何“调高/调低”会影响什么）
-# ----------------------------------------------------------------------------
-# 通用建议
-# - 一次只调一个维度，变更要有记录；观察里程计稳定性、回环是否正常、CPU/内存占用。
-# - 先保证时序与链路稳定（IMU/点云速率、TF、网络），再做精细调参。
-# - 室内以稳定性为先（适度下采样、较小半径）；空旷/长走廊适当增大搜索范围与远距。
-#
-# 关键旋钮与影响（↑=调高/变大，↓=调低/变小）
-# 1) 点云采样/分辨率（速度 vs. 细节）
-#    - fastlio2.lidar_filter_num：↑更快/细节↓；↓更细/耗时↑
-#    - fastlio2.scan_resolution / map_resolution：↑更粗更快；↓更细更慢
-#    - localizer.dynamic_filter.downsample_ratio：↑更快/动态检测保守；↓更细/耗时↑
-#    - localizer.dynamic_filter.voxel_size_base：↑邻域更粗/速度↑；↓更细/速度↓
-#
-# 2) 范围阈值（噪声 vs. 信息）
-#    - fastlio2.lidar_min_range：↑近噪↓/近结构丢失↑；↓近细节↑/噪声↑
-#    - fastlio2.lidar_max_range：↑远距鲁棒↑/耗时↑；↓速度↑/远距信息↓
-#    - localizer.dynamic_filter.search_radius：↑鲁棒↑/耗时↑；↓更快/易噪声
-#
-# 3) 收敛与鲁棒（精度 vs. 计算）
-#    - fastlio2.algorithm.near_search_num / ieskf_max_iter：↑更稳/耗时↑；↓更快/欠收敛风险↑
-#    - fastlio2.point_cloud.lidar_cov_inv/scale：↑更信任点云/响应↑；↓更依赖IMU/更平滑
-#
-# 4) 动态过滤（误检 vs. 漏检）
-#    - motion_threshold：↑更保守（动态点↓）；↓更敏感（误检↑）
-#    - history_size：↑稳定性↑/延迟↑/耗时↑；↓实时性↑/鲁棒性↓
-#    - stability_threshold：↑更严格（动态点↑）；↓更宽松（误检↓）
-#    - min_neighbors / normal_consistency_thresh / density_ratio_thresh：↑更严格/误检↓；↓更宽松/速度↑
-#
-# 5) 关键帧/回环（优化频率 vs. 误匹配风险）
-#    - pgo.key_pose_*：阈值↓关键帧更密/耗时↑；阈值↑更稀疏/错过回环风险↑
-#    - pgo.loop_search_radius / loop_score_tresh / loop_time_tresh：半径↑更易命中但误回环风险↑；分数阈值↓宽松；时间阈值↓更频繁
-#
-# 6) 资源与监控
-#    - buffer_management.*：IMU缓冲调大可抗堵塞但掩盖问题；调小更快暴露瓶颈
-#    - monitoring.performance/diagnostics 频率：↑更实时/CPU↑；↓更轻量
-# ----------------------------------------------------------------------------
-
-# ============================================================================
-# 系统基本信息
-# ============================================================================
 system:
-  name: "MID360_SLAM_System"
-  version: "2.0"
-  description: "基于Livox MID360的实时SLAM建图系统"
-
-# ============================================================================
-# 网络配置 (统一管理，避免冲突)
-# ============================================================================
+  name: MID360_SLAM_System
+  version: '2.0'
+  description: 基于Livox MID360的实时SLAM建图系统
 network:
-  # 主机网络配置
   host:
-    ip: "192.168.1.50"
-    interface: "enp7s0"
-    gateway: "192.168.1.1"
-    netmask: "255.255.255.0"
-
-  # 雷达网络配置
+    ip: 192.168.1.50
+    interface: enp7s0
+    gateway: 192.168.1.1
+    netmask: 255.255.255.0
   lidar:
-    ip: "192.168.1.3"
-    # 端口配置 - 雷达端
+    ip: 192.168.1.3
     lidar_ports:
       cmd_data: 56100
       push_msg: 56200
       point_data: 56300
       imu_data: 56400
       log_data: 56500
-    # 端口配置 - 主机端
     host_ports:
       cmd_data: 56101
       push_msg: 56201
       point_data: 56301
       imu_data: 56401
       log_data: 56501
-
-# ============================================================================
-# 硬件标定参数 (关键：解决轨迹飘移的核心)
-# ============================================================================
 calibration:
-  # 雷达到IMU的外参 (标准：从IMU到雷达坐标系的变换)
   lidar_to_imu:
-    # 平移向量 [x, y, z] (米)
-    # 来自MID360规格：IMU在点云坐标系(=雷达坐标系)下的位置 (0.011, 0.02329, -0.04412)m
-    # 由于IMU与点云坐标轴一致(R_il=I)，因此 t_il 采用相同分量
-    translation: [0.011, 0.02329, -0.04412]
-    # 旋转矩阵 [3x3展开为9个元素]
-    rotation: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
-
-  # 雷达到base_link的外参
+    translation:
+    - 0.011
+    - 0.02329
+    - -0.04412
+    rotation:
+    - 1.0
+    - 0.0
+    - 0.0
+    - 0.0
+    - 1.0
+    - 0.0
+    - 0.0
+    - 0.0
+    - 1.0
   lidar_to_baselink:
-    translation: [0.0, 0.0, 0.0]
-    rotation_rpy: [0.0, 0.0, 0.0]  # roll, pitch, yaw
-
-# ============================================================================
-# 坐标系配置 (统一命名规范)
-# ============================================================================
+    translation:
+    - 0.0
+    - 0.0
+    - 0.0
+    rotation_rpy:
+    - 0.0
+    - 0.0
+    - 0.0
 frames:
-  world_frame: "odom"
-  base_frame: "base_link"
-  lidar_frame: "livox_frame"
-
-# ============================================================================
-# ROS话题配置
-# ============================================================================
+  world_frame: odom
+  base_frame: base_link
+  lidar_frame: livox_frame
 topics:
-  # 输入话题
-  imu: "/livox/imu"
-  lidar: "/livox/lidar_filtered"  # FastLIO2使用过滤后的点云数据
-
-  # SLAM输出话题（与协同启动的重映射一致）
-  odometry: "/slam/lio_odom"
-  path: "/slam/lio_path"
-  body_cloud: "/slam/body_cloud"
-  world_cloud: "/slam/world_cloud"
-  loop_markers: "/slam/loop_markers"      # PGO回环标记（MarkerArray）
-  hba_map: "/hba/map_points"              # HBA优化后的地图点云
-  performance: "/slam/performance_metrics"
-  diagnostics: "/slam/diagnostics"
-
-# ============================================================================
-# Livox雷达驱动配置
-# ============================================================================
+  imu: /livox/imu          # IMU话题（回放/实机一致）
+  lidar: /livox/lidar      # LiDAR话题｜回放：/livox/lidar；实机：/livox/lidar_filtered（经过滤桥）
+  odometry: /slam/lio_odom
+  path: /slam/lio_path
+  body_cloud: /slam/body_cloud
+  world_cloud: /slam/world_cloud
+  loop_markers: /slam/loop_markers
+  hba_map: /hba/map_points
+  performance: /slam/performance_metrics
+  diagnostics: /slam/diagnostics
 livox_driver:
-  # 数据传输格式
-  xfer_format: 1                    # 0-PointCloud2, 1-自定义格式
-  multi_topic: 0                    # 0-共享话题, 1-每个雷达一个话题
-  data_src: 0                       # 0-雷达数据, 其他-无效
-  publish_freq: 10.0                # 发布频率 (Hz)
-  output_data_type: 0               # 输出数据类型
-  frame_id: "livox_frame"           # 坐标系名称
-  cmdline_input_bd_code: "livox0000000001"  # 设备识别码
-
-  # 雷达特定配置
+  xfer_format: 1            # 数据打包｜↑(2) 吞吐↑/兼容↓；↓(1) 兼容↑/吞吐↓
+  multi_topic: 0            # 多话题输出｜↑(1) 灵活/订阅多；↓(0) 简单
+  data_src: 0               # 数据源 0=设备 1=文件｜一般保持0
+  publish_freq: 10.0        # 发布频率Hz｜↑ 实时↑/CPU↑；↓ 轻量/时间分辨率↓
+  output_data_type: 0       # 输出类型｜↑(1/带更多域) 可视化↑/带宽↑；↓(0/XYZI) 轻量
+  frame_id: livox_frame     # 传感器坐标系
+  cmdline_input_bd_code: livox0000000001
   lidar_config:
-    pcl_data_type: 1                # 0-笛卡尔坐标, 1-球坐标
-    pattern_mode: 0                 # 扫描模式
-
-# ============================================================================
-# FAST-LIO2 SLAM算法配置
-# ============================================================================
+    pcl_data_type: 1        # 点格式｜↑ 通道多/带宽↑；↓ 轻量
+    pattern_mode: 0         # 扫描模式｜↑(1) 细节↑/带宽↑；↓(0) 速度↑/细节↓
 fastlio2:
-  # 基本配置
-  print_time_cost: true
-
-  # 雷达预处理参数
-  lidar_filter_num: 2               # 适度降采样，降低计算与冗余｜↑ 更快/细节↓；↓ 更细/耗时↑
-  lidar_min_range: 0.5              # 最小检测距离 (米)｜↑ 去近噪；↓ 近细节↑但噪声↑
-  lidar_max_range: 25.0             # 最大检测距离 (米，室内优化)｜↑ 远距鲁棒↑/耗时↑；↓ 速度↑/远距信息↓
-  scan_resolution: 0.05             # 扫描分辨率 (米)｜↑ 更粗更快；↓ 更细更慢
-  map_resolution: 0.05              # 地图分辨率 (米)｜↑ 更粗更快；↓ 更细更慢
-
-  # 地图管理参数
-  cube_len: 100                     # 局部地图范围 (米)｜↑ 内存↑/更稳；↓ 更轻量/易退化
-  det_range: 30                     # 检测范围 (米)｜↑ 匹配半径↑/耗时↑；↓ 速度↑/远距匹配↓
-  move_thresh: 0.8                  # 运动阈值 (米)｜↑ 更新稀疏/漂移风险↑；↓ 更新频繁/耗时↑
-
-  # IMU噪声参数 (针对MID360内置IMU优化)
+  print_time_cost: true     # 打印耗时｜↑ 便于调试；↓ 安静
+  lidar_filter_num: 2       # 点云滤波次数｜↑ 速度↑/细节↓；↓ 细节↑/耗时↑
+  lidar_min_range: 0.5      # 最近距离m｜↑ 近噪↓/近结构↓；↓ 近细节↑/噪声↑
+  lidar_max_range: 25.0     # 最远距离m｜↑ 远距鲁棒↑/耗时↑；↓ 速度↑/远距↓
+  scan_resolution: 0.1     # 扫描分辨率m｜↑ 更粗更快；↓ 更细更慢
+  map_resolution: 0.1      # 地图分辨率m｜↑ 更粗更快；↓ 更细更慢
+  cube_len: 100             # 局部地图范围m｜↑ 内存↑/稳定↑；↓ 轻量/退化风险↑
+  det_range: 30             # 匹配检测范围m｜↑ 收敛稳/耗时↑；↓ 速度↑/易欠收敛
+  move_thresh: 0.8          # 关键帧移动阈值m｜↑ 更稀疏/漂移风险↑；↓ 更密/耗时↑
   imu_noise:
-    accelerometer: 0.005            # 加速度计噪声 (na)｜↑ 更保守/平滑；↓ 更敏感/易抖
-    gyroscope: 0.005                # 陀螺仪噪声 (ng)｜↑ 更保守/平滑；↓ 更敏感/易抖
-    acc_bias: 0.0001                # 加速度计偏置噪声 (nba)｜↑ 对偏置不自信/更稳；↓ 更自信/可能过拟合
-    gyro_bias: 0.00005              # 陀螺仪偏置噪声 (nbg)｜同上
-
-  # 算法优化参数 (防飘移关键设置)
+    accelerometer: 0.005    # 加计噪声｜↑ 更保守/平滑；↓ 更敏感/抖动
+    gyroscope: 0.005        # 陀螺噪声｜同上
+    acc_bias: 0.0001        # 加计偏置噪声｜↑ 偏置不自信；↓ 偏置更可信
+    gyro_bias: 5.0e-05      # 陀螺偏置噪声｜同上
   algorithm:
-    imu_init_num: 200               # IMU初始化样本数 (提高稳定性)｜↑ 启动更稳更慢；↓ 更快可能不稳
-    near_search_num: 10             # KNN搜索邻居数 (狭窄空间降低负载)｜↑ 收敛更好/耗时↑；↓ 更快/欠收敛风险↑
-    ieskf_max_iter: 5               # IESKF最大迭代次数｜↑ 精度↑/耗时↑；↓ 速度↑/精度↓
-    gravity_align: true             # 重力对齐
-    esti_il: true                   # 是否估计雷达-IMU外参
-
-  # 点云匹配参数
+    imu_init_num: 200       # IMU初始化样本｜↑ 启动更稳/更慢；↓ 更快/不稳
+    near_search_num: 10     # 最近邻数量｜↑ 稳定↑/耗时↑；↓ 速度↑/欠收敛
+    ieskf_max_iter: 5       # 迭代次数｜↑ 精度↑/耗时↑；↓ 速度↑
+    gravity_align: true     # 重力对齐
+    esti_il: false           # 估计雷达-IMU外参
   point_cloud:
-    lidar_cov_inv: 2000.0           # 雷达协方差逆值 (提高置信度)｜↑ 更信任点云/响应↑；↓ 更依赖IMU/更平滑
-    lidar_cov_scale: 1.0            # 雷达协方差缩放因子｜同上
-    point_filter_num: 4             # 点云滤波数量｜↑ 速度↑/细节↓；↓ 速度↓/细节↑
-    converge_thresh: 0.0001         # 收敛阈值｜↑ 更易早停/速度↑；↓ 更严格/精度↑
-
-  # 缓冲区管理参数 (内存安全和线程优化)
+    lidar_cov_inv: 2000.0   # 点云置信度｜↑ 更信任点云/响应快；↓ 更依赖IMU
+    lidar_cov_scale: 1.0    # 置信度缩放
+    point_filter_num: 4     # 点云过滤级数｜↑ 速度↑/细节↓；↓ 细节↑/耗时↑
+    converge_thresh: 0.0001 # 收敛阈值｜↑ 易早停/速度↑；↓ 更严格/精度↑
   buffer_management:
-    max_imu_buffer_size: 4000       # IMU缓冲区最大大小（适配高频/拥塞）｜↑ 抗堵塞/内存↑；↓ 更快暴露瓶颈
-    max_lidar_buffer_size: 50       # 激光雷达缓冲区最大大小｜↑ 抗抖动/内存↑；↓ 更敏捷/易丢帧
-    enable_buffer_monitoring: true  # 启用缓冲区监控和警告
-
-# ============================================================================
-# 可视化配置
-# ============================================================================
+    max_imu_buffer_size: 4000   # IMU缓冲｜↑ 抗堵塞/掩盖问题；↓ 及时暴露问题
+    max_lidar_buffer_size: 50   # LiDAR缓冲｜↑ 抗抖动/内存↑；↓ 敏捷/丢帧风险↑
+    enable_buffer_monitoring: true # 缓冲监控
+  lidar_topic: /livox/lidar
+  imu_topic: /livox/imu
 visualization:
   rviz:
-    auto_start: true
-    config_file: "enhanced_fastlio2.rviz"
+    auto_start: true        # 自动启动RViz｜↑ 便捷/资源↑；↓ 手动更轻量
+    config_file: enhanced_fastlio2.rviz
     display:
-      pointcloud: true
-      trajectory: true
-      tf_frames: true
-      imu_pose: true
-      diagnostics: true
-
-# ============================================================================
-# 数据记录配置
-# ============================================================================
+      pointcloud: true      # ↑ 直观/显存↑；↓ 轻量
+      trajectory: true      # ↑ 评估回环；↓ 轻量
+      tf_frames: true       # ↑ 诊断方便；↓ 轻量
+      imu_pose: true        # ↑ 检查IMU；↓ 轻量
+      diagnostics: true     # ↑ 观测性能；↓ 轻量
 rosbag:
-  auto_record: false               # ｜true 自动录包(取证)/CPU与磁盘↑；false 手动
+  auto_record: false        # 自动录包｜↑ 取证/磁盘↑；↓ 手动控制
   topics:
-    - "/livox/lidar"
-    - "/livox/imu"
-    - "/slam/lio_odom"
-    - "/slam/lio_path"
-    - "/slam/body_cloud"
-    - "/tf"
-    - "/tf_static"
-  output_dir: "data/rosbags"       # ｜录包输出目录
-  compression_format: "zstd"       # ｜zstd 压缩比高/CPU↑；lz4 速度快/压缩↓
-  max_duration: 0                   # 0表示无限制｜>0 按秒切包，便于长期录制
-
-# ============================================================================
-# 系统监控和调试配置
-# ============================================================================
+  - /livox/lidar
+  - /livox/imu
+  - /slam/lio_odom
+  - /slam/lio_path
+  - /slam/body_cloud
+  - /tf
+  - /tf_static
+  output_dir: data/rosbags
+  compression_format: zstd  # zstd 压缩比↑/CPU↑；lz4 速度↑/压缩↓
+  max_duration: 0           # 切包秒数｜0=不限；↑ 便于长期录制管理
 monitoring:
   performance:
-    enable_metrics: true            # ｜开启性能指标发布
-    publish_frequency: 1.0          # Hz｜↑ 更实时/CPU↑；↓ 更轻量
-
+    enable_metrics: true    # 性能指标｜↑ 实时监控/CPU↑；↓ 轻量
+    publish_frequency: 1.0  # Hz｜↑ 更实时/CPU↑；↓ 更轻量
   diagnostics:
-    enable_diagnostics: true        # ｜开启诊断检查
-    check_frequency: 2.0            # Hz｜↑ 更敏感/CPU↑；↓ 更轻量
-
+    enable_diagnostics: true # 诊断检查｜↑ 敏感/CPU↑；↓ 轻量
+    check_frequency: 2.0     # Hz｜↑ 更敏感/CPU↑；↓ 更轻量
   logging:
-    level: "INFO"                   # DEBUG, INFO, WARN, ERROR｜生产建议 INFO/WARN
-    verbose: false                  # ｜true 输出更详细(刷屏风险)
-
-# ============================================================================
-# PGO (位姿图优化) 配置
-# ============================================================================
+    level: INFO             # DEBUG/INFO/WARN/ERROR｜↑ 信息↑/刷屏；↓ 轻量
+    verbose: false          # 详细日志｜↑ 细节/刷屏；↓ 安静
 pgo:
-  # 基本话题配置
-  cloud_topic: "/localizer/filtered_cloud"   # ｜PGO输入点云
-  odom_topic: "/slam/lio_odom"               # ｜里程计输入
-  map_frame: "map"                            # ｜优化输出坐标系
-  local_frame: "lidar"                        # ｜局部坐标系
-
-  # 关键帧选择参数 (室内建图优化)
-  key_pose_delta_deg: 10            # 角度阈值 (度)｜↓ 关键帧更密/耗时↑；↑ 更稀疏
-  key_pose_delta_trans: 0.3         # 平移阈值 (米)｜↓ 更密/耗时↑；↑ 更稀疏
-
-  # 回环检测参数 (室内优化)
-  loop_search_radius: 2.5           # 回环搜索半径 (米)｜↑ 命中↑/误匹配风险↑；↓ 保守
-  loop_time_tresh: 30.0             # 回环时间阈值 (秒)｜↓ 更频繁/CPU↑；↑ 更少
-  loop_score_tresh: 0.15            # 回环匹配分数阈值｜↓ 宽松/易误回环；↑ 严格/漏检↑
-
-  # 子地图参数
-  loop_submap_half_range: 5         # 子地图半径｜↑ 覆盖↑/耗时↑；↓ 速度↑
-  submap_resolution: 0.1            # 子地图分辨率 (米)｜↑ 更粗更快；↓ 更细更慢
-  min_loop_detect_duration: 5.0     # 最小回环检测间隔 (秒)｜↓ 更频繁/CPU↑
-
-# ============================================================================
-# HBA (层次化捆绑调整) 配置
-# ============================================================================
+  cloud_topic: /localizer/filtered_cloud   # PGO输入点云（回放预设）
+  odom_topic: /slam/lio_odom
+  map_frame: map
+  local_frame: lidar
+  key_pose_delta_deg: 10         # 关键帧角度阈值°｜↑ 更稀疏/速度↑；↓ 更密/耗时↑/回环稳
+  key_pose_delta_trans: 0.3      # 关键帧位移阈值m｜↑ 更稀疏；↓ 更密
+  loop_search_radius: 5.0        # 回环搜索半径m｜↑ 命中↑/误匹配风险↑/耗时↑；↓ 更保守
+  loop_time_tresh: 10.0          # 回环时间阈值s｜↓ 更频繁/CPU↑；↑ 更少
+  loop_score_tresh: 0.3          # 回环分数阈值｜↑ 更宽松(易通过)/误回环风险↑；↓ 更严格
+  loop_submap_half_range: 5      # 子图半径｜↑ 匹配稳/耗时↑；↓ 更快
+  submap_resolution: 0.1         # 子图分辨率m｜↑ 粗快；↓ 细慢
+  min_loop_detect_duration: 2.0  # 检测间隔s｜↓ 更频繁；↑ 更少
 hba:
-  # 扫描分辨率
-  scan_resolution: 0.1              # 扫描分辨率 (米)｜↑ 更粗更快；↓ 更细更慢
-
-  # 滑动窗口参数
-  window_size: 20                   # 窗口大小｜↑ 精度↑/耗时↑；↓ 更快
-  stride: 10                        # 步长｜↓ 更密/耗时↑；↑ 更稀疏
-
-  # 点云处理参数
-  voxel_size: 0.5                   # 体素大小 (米)｜↓ 细节↑/耗时↑；↑ 速度↑
-  min_point_num: 10                 # 最小点数｜↑ 更稳/耗时↑；↓ 更快/易噪
-  max_layer: 3                      # 最大层数｜↑ 更丰富/耗时↑；↓ 更快
-
-  # 优化参数
-  plane_thresh: 0.01                # 平面阈值｜↑ 严格/平面更纯；↓ 宽松
-  ba_max_iter: 10                   # BA最大迭代次数｜↑ 精度↑/耗时↑
-  hba_iter: 5                       # HBA迭代次数｜↑ 精度↑/耗时↑
-  down_sample: 0.1                  # 下采样分辨率｜↑ 更稀/速度↑；↓ 更密/精度↑
-
-# ============================================================================
-# Localizer (定位器) 配置
-# ============================================================================
+  scan_resolution: 0.1       # 扫描分辨率m｜↑ 粗快；↓ 细慢
+  window_size: 20            # 窗口大小｜↑ 精度↑/耗时↑；↓ 更快
+  stride: 10                 # 步长｜↓ 更密/耗时↑；↑ 更稀疏
+  voxel_size: 0.5            # 体素m｜↓ 细节↑/耗时↑；↑ 速度↑
+  min_point_num: 10          # 最小点数｜↑ 稳定↑/耗时↑；↓ 速度↑/噪声↑
+  max_layer: 3               # 最大层数｜↑ 表达力↑/耗时↑；↓ 更快
+  plane_thresh: 0.01         # 平面阈值｜↑ 严格/更纯；↓ 宽松
+  ba_max_iter: 10            # BA迭代｜↑ 精度↑/耗时↑；↓ 更快
+  hba_iter: 5                # HBA迭代｜↑ 一致性↑/耗时↑；↓ 更快
+  down_sample: 0.1           # 下采样m｜↑ 稀疏/速度↑；↓ 稠密/精度↑
 localizer:
-  # 基本话题配置
-  # 订阅来自FAST-LIO2的原始身体坐标系点云（经cooperative启动重映射为/slam/body_cloud）
-  cloud_topic: "/slam/body_cloud"
-  odom_topic: "/slam/lio_odom"
-  map_frame: "map"
-  local_frame: "lidar"
-  update_hz: 1.0                    # 更新频率 (Hz)｜↑ 更快/CPU↑；↓ 更省/响应慢
-
-  # 粗定位参数
+  cloud_topic: /slam/body_cloud
+  odom_topic: /slam/lio_odom
+  map_frame: map
+  local_frame: lidar
+  update_hz: 1.0             # 更新频率Hz｜↑ 响应↑/CPU↑；↓ 轻量
   rough_localization:
-    scan_resolution: 0.25           # 粗扫描分辨率 (米)｜↑ 更粗/更快；↓ 更细/更慢
-    map_resolution: 0.25            # 粗地图分辨率 (米)｜↑ 更粗/更快；↓ 更细/更慢
-    max_iteration: 5                # 最大迭代次数｜↑ 精度↑/耗时↑；↓ 更快
-    score_thresh: 0.2               # 匹配分数阈值｜↑ 更严格；↓ 更宽松/易错配
-
-  # 精细定位参数
+    scan_resolution: 0.25    # 粗配准扫描分辨率m｜↑ 粗快；↓ 细慢
+    map_resolution: 0.25     # 粗地图分辨率m｜同上
+    max_iteration: 5         # 粗配准迭代｜↑ 精度↑/耗时↑；↓ 更快
+    score_thresh: 0.2        # 粗配准分数阈值｜↑ 严格；↓ 宽松
   refine_localization:
-    scan_resolution: 0.1            # 精细扫描分辨率 (米)｜↑ 更粗/更快；↓ 更细/更慢
-    map_resolution: 0.1             # 精细地图分辨率 (米)｜↑ 更粗/更快；↓ 更细/更慢
-    max_iteration: 10               # 最大迭代次数｜↑ 精度↑/耗时↑；↓ 更快
-    score_thresh: 0.1               # 匹配分数阈值｜↑ 更严格；↓ 更宽松/易错配
-
-  # 动态对象过滤器配置
-  # 基于多帧时间一致性和几何特征分析的混合动态对象检测算法
-  # 用于在SLAM过程中实时过滤动态物体，提高定位和建图精度
+    scan_resolution: 0.1     # 精配准扫描分辨率m｜↑ 粗快；↓ 细慢
+    map_resolution: 0.1      # 精地图分辨率m｜同上
+    max_iteration: 10        # 精配准迭代｜↑ 精度↑/耗时↑；↓ 更快
+    score_thresh: 0.1        # 精配准分数阈值｜↑ 严格；↓ 宽松
   dynamic_filter:
-    enable: false                   # 禁用Localizer动态过滤（FastLIO2输入已使用专用过滤桥接节点过滤）｜true 开启过滤/耗时↑
-                                    # 避免重复过滤，保持数据流一致性
-
-    publish_stats: true             # 是否发布过滤统计信息到ROS话题｜开启统计
-                                    # 包括过滤点数、处理时间、动态对象数量等性能指标
-
-    # ========================================================================
-    # 时间一致性分析参数
-    # 通过跟踪点在多帧间的位置变化来识别动态对象
-    # ========================================================================
-    motion_threshold: 0.1           # 点运动检测阈值 (单位: 米)｜↑ 保守(动态↓)；↓ 敏感(误检↑)
-                                    # 点在相邻帧间移动距离超过此值被标记为运动点
-                                    # 推荐范围: 0.05-0.2m，室内环境用较小值
-
-    history_size: 5                 # 时间历史窗口大小 (单位: 帧数)｜↑ 稳定/延迟↑；↓ 实时/鲁棒↓
-                                    # 用于计算点的时间稳定性，帧数越多检测越准确但延迟增加
-                                    # 推荐范围: 3-10帧，LiDAR频率10Hz时对应0.3-1.0秒
-
-    stability_threshold: 0.8        # 点稳定性判定阈值 (范围: 0-1)｜↑ 严格；↓ 宽松
-                                    # 点在历史帧中静止比例超过此值被认为是静态
-                                    # 0.8表示80%的历史帧中保持静止才认为是静态点
-
-    max_time_diff: 0.5              # 点云帧间最大时间差限制 (单位: 秒)｜↑ 历史利用↑/陈旧风险↑；↓ 实时↑
-                                    # 超过此时间差的历史帧将被丢弃，避免过旧数据影响判断
-                                    # 推荐设置为2-5倍的传感器采样周期
-
-    # ========================================================================
-    # 几何特征一致性参数
-    # 通过分析点的局部几何特征（法向量、点密度）验证动态检测结果
-    # ========================================================================
-    search_radius: 0.2              # K近邻搜索半径 (单位: 米)｜↑ 鲁棒/耗时↑；↓ 更快/易噪
-                                    # 用于计算每个点的局部几何特征的邻域范围
-                                    # 应根据点云密度调整，密集点云用较小值
-
-    min_neighbors: 10               # 几何特征计算所需的最小邻居点数｜↑ 稳/漏检↑；↓ 松/误检↑
-                                    # 邻居数不足时跳过几何验证，避免不可靠的特征计算
-                                    # 推荐范围: 5-20个点
-
-    normal_consistency_thresh: 0.8  # 法向量一致性验证阈值 (范围: 0-1)｜↑ 严格；↓ 宽松
-                                    # 点与邻域法向量夹角余弦值超过此阈值认为几何一致
-                                    # 0.8对应约36度角度差，可过滤表面不连续的噪声点
-
-    density_ratio_thresh: 0.5       # 局部点密度比值阈值 (范围: 0-1)｜↑ 严格；↓ 宽松
-                                    # 当前帧与历史帧局部密度比值，低于此值可能是动态对象
-                                    # 0.5表示密度降低超过50%时标记为可疑动态区域
-
-    # ========================================================================
-    # 性能优化参数
-    # 在保证检测精度的前提下优化算法的计算效率和内存使用
-    # ========================================================================
-    downsample_ratio: 2             # 输入点云降采样比例 (整数倍)｜↑ 更快/细节↓；↓ 更细/耗时↑
-                                    # 每隔N个点取1个点进行处理，减少计算量
-                                    # 1=不降采样，2=保留50%点，4=保留25%点
-
-    max_points_per_frame: 50000     # 单帧处理的最大点数限制｜↑ 不丢点/耗时↑；↓ 更快/可能欠采样
-                                    # 超过此数量时进行随机采样，防止计算量过大
-                                    # 根据硬件性能调整：强CPU可设置更高值
-
-    voxel_size_base: 0.01           # 体素化网格基础大小 (单位: 米)｜↑ 更粗/速度↑；↓ 更细/速度↓
-                                    # 用于点云预处理和邻域搜索加速
-                                    # 较小值保留更多细节但增加计算量
-
-# ============================================================================
-# 协同优化配置
-# ============================================================================
+    enable: true             # 开启动态过滤｜↑ 地图更干净/CPU↑；↓ 轻量
+    publish_stats: true      # 发布过滤统计｜↑ 调试方便/CPU↑；↓ 轻量
+    motion_threshold: 0.1    # 运动阈值m｜↑ 保守(动态↓)；↓ 敏感(误检↑)
+    history_size: 5          # 历史帧数｜↑ 稳定↑/延迟↑/耗时↑；↓ 实时↑
+    stability_threshold: 0.8 # 稳定性判定0~1｜↑ 严格；↓ 宽松
+    max_time_diff: 0.5       # 帧间最大时间差s｜↑ 历史利用↑；↓ 实时↑
+    search_radius: 0.2       # 邻域半径m｜↑ 鲁棒↑/耗时↑；↓ 更快
+    min_neighbors: 10        # 最小邻居数｜↑ 稳定↑；↓ 速度↑/噪声↑
+    normal_consistency_thresh: 0.8 # 法向一致性阈值｜↑ 严格；↓ 宽松
+    density_ratio_thresh: 0.5 # 密度比阈值｜↑ 严格；↓ 宽松
+    downsample_ratio: 2       # 随机降采样倍数｜↑ 速度↑/细节↓；↓ 细节↑
+    max_points_per_frame: 50000 # 单帧点数上限｜↑ 不丢点/耗时↑；↓ 更快
+    voxel_size_base: 0.05     # 体素基础大小m｜↑ 更快/细节↓；↓ 更细/耗时↑
 cooperation:
-  # 协同优化开关
-  enable: true                      # 启用协同优化｜开启协同
-
-  # 漂移检测参数
-  drift_threshold: 0.5              # 漂移检测阈值 (米)｜↓ 更敏感/优化更频繁；↑ 更保守
-  time_threshold: 60.0              # 时间触发阈值 (秒)｜↓ 更频繁；↑ 更少
-  emergency_threshold: 2.0          # 紧急优化阈值 (米)｜↓ 更容易触发；↑ 更保守
-  auto_optimization: true           # 自动优化开关｜自动触发
-
-  # 多机协同参数 (预留)
+  enable: true
+  drift_threshold: 0.5       # 漂移阈值m｜↓ 更敏感/优化更频；↑ 更保守
+  time_threshold: 60.0       # 时间触发s｜↓ 更频繁；↑ 更少
+  emergency_threshold: 2.0   # 紧急优化阈值m｜↓ 更容易触发；↑ 更保守
+  auto_optimization: true
   multi_agent:
-    max_agents: 4                   # 最大机器人数量｜↑ 支持更多/通信负载↑
-    communication_freq: 5.0         # 通信频率 (Hz)｜↑ 更及时/带宽↑；↓ 更省
-
-# ============================================================================
-# 配置验证规则
-# ============================================================================
+    max_agents: 4
+    communication_freq: 5.0  # 通信频率Hz｜↑ 实时↑/带宽↑；↓ 轻量
 validation:
-  # 自动检查项目
   checks:
-    network_connectivity: true      # ｜检查网络连通
-    calibration_consistency: true   # ｜检查外参一致性
-    topic_availability: true        # ｜检查关键话题
-    parameter_ranges: true          # ｜检查参数范围
-
-  # 参数约束
+    network_connectivity: true
+    calibration_consistency: true
+    topic_availability: true
+    parameter_ranges: true
   constraints:
     lidar_max_range:
       min: 1.0

@@ -415,7 +415,14 @@ check_slam_dependencies() {
     return 0
 }
 
-case "$1" in
+# 解析主命令（在 set -u 下需安全取参）
+CMD="${1-}"
+if [[ -z "${CMD}" ]]; then
+  show_help
+  exit 0
+fi
+
+case "${CMD}" in
     "start")
         echo -e "${GREEN}启动完整SLAM系统 (所有可用组件)...${NC}"
         start_cooperative_slam_system
@@ -818,7 +825,7 @@ case "$1" in
         ;;
     
     "view")
-        if [ -z "$2" ]; then
+        if [ -z "${2-}" ]; then
             echo -e "${YELLOW}查看可用的地图文件:${NC}"
             if [ -d "saved_maps" ]; then
                 echo "saved_maps 目录中的文件:"
@@ -840,7 +847,7 @@ case "$1" in
                 echo "请先运行 '$0 save' 保存地图"
             fi
         else
-            PCD_FILE="$2"
+            PCD_FILE="${2-}"
             if [ ! -f "$PCD_FILE" ]; then
                 echo -e "${RED}❌ PCD文件不存在: $PCD_FILE${NC}"
                 exit 1
@@ -1197,8 +1204,8 @@ case "$1" in
         echo ""
 
         # 如果提供了参数，使用指定的文件
-        if [ -n "$2" ]; then
-            selected_pcd="$2"
+        if [ -n "${2-}" ]; then
+            selected_pcd="${2}"
             # 如果不是完整路径，在maps目录中查找
             if [ ! -f "$selected_pcd" ]; then
                 selected_pcd="$MAPS_DIR/$2"

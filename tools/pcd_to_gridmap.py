@@ -18,7 +18,10 @@ class PCDToGridMap:
                  ceiling_height=(1.8, 3.0), robot_height=0.8,
                  obstacle_threshold=3, vertical_continuity_threshold=0.8,
                  panoramic_analysis=True,
-                 inflate_radius=0.0):
+                 inflate_radius=0.0,
+                 use_vertical_structures=False,
+                 require_vertical_for_obstacle=True,
+                 ground_dominates_ratio=2.0):
         """
         初始化PCD到栅格地图转换器（增强版本：利用MID360全景扫描）
 
@@ -39,6 +42,9 @@ class PCDToGridMap:
         self.vertical_continuity_threshold = vertical_continuity_threshold
         self.panoramic_analysis = panoramic_analysis
         self.inflate_radius = inflate_radius
+        self.use_vertical_structures = use_vertical_structures
+        self.require_vertical_for_obstacle = require_vertical_for_obstacle
+        self.ground_dominates_ratio = ground_dominates_ratio
 
         # 多层高度分析参数
         self.height_layers = {
@@ -82,7 +88,7 @@ class PCDToGridMap:
 
     def detect_vertical_structures(self, points):
         """检测垂直结构（墙面、柱子等）"""
-        if not self.panoramic_analysis:
+        if not self.use_vertical_structures:
             return np.array([])
 
         # 计算每个点在XY平面上的栅格坐标
@@ -175,6 +181,24 @@ class PCDToGridMap:
         # 转换到栅格坐标
         grid_x, grid_y, grid_width, grid_height, origin_x, origin_y = self.points_to_grid(navigable_points)
 
+        # 计算全高度跨度图（使用同一原点/尺寸）
+        gx_all = ((points[:, 0] - origin_x) / self.resolution).astype(int)
+        gy_all = ((points[:, 1] - origin_y) / self.resolution).astype(int)
+        valid_all = (gx_all >= 0) & (gx_all < grid_width) & (gy_all >= 0) & (gy_all < grid_height)
+        gx_all = gx_all[valid_all]
+        gy_all = gy_all[valid_all]
+        z_all = points[:, 2][valid_all]
+
+        height_min = np.full((grid_height, grid_width), np.inf, dtype=np.float32)
+        height_max = np.full((grid_height, grid_width), -np.inf, dtype=np.float32)
+        for x, y, z in zip(gx_all, gy_all, z_all):
+            if z < height_min[y, x]:
+                height_min[y, x] = z
+            if z > height_max[y, x]:
+                height_max[y, x] = z
+        height_span_map = height_max - height_min
+        height_span_map[~np.isfinite(height_span_map)] = 0.0
+
         # 创建多层密度地图（统一使用导航网格的原点与尺寸，避免坐标错位）
         density_maps = {}
         for layer_name, points_layer in layer_points.items():
@@ -197,7 +221,7 @@ class PCDToGridMap:
             density_maps[layer_name] = density_map
 
         # 创建增强占用栅格地图
-        occupancy_grid = self.create_enhanced_occupancy_grid(density_maps, grid_width, grid_height)
+        occupancy_grid = self.create_enhanced_occupancy_grid(density_maps, grid_width, grid_height, height_span_map)
 
         # 处理垂直结构
         if len(vertical_structures) > 0:
@@ -226,7 +250,7 @@ class PCDToGridMap:
 
         return occupancy_grid, metadata
 
-    def create_enhanced_occupancy_grid(self, density_maps, grid_width, grid_height):
+    def create_enhanced_occupancy_grid(self, density_maps, grid_width, grid_height, height_span_map):
         """创建增强占用栅格地图（多层分析）"""
         occupancy_grid = np.full((grid_height, grid_width), -1, dtype=np.int8)  # 默认未知
 
@@ -240,8 +264,12 @@ class PCDToGridMap:
         # 机器人高度层分析：主要障碍物检测
         if 'robot' in density_maps:
             robot_density = density_maps['robot']
-            # 机器人高度层的高密度点云为障碍物
-            obstacle_mask = robot_density >= self.obstacle_threshold
+            # 约束：需要有明显垂直高度跨度，避免走廊中线被误判
+            if self.require_vertical_for_obstacle:
+                vertical_mask = height_span_map > (self.robot_height * self.vertical_continuity_threshold)
+                obstacle_mask = (robot_density >= self.obstacle_threshold) & vertical_mask
+            else:
+                obstacle_mask = (robot_density >= self.obstacle_threshold)
             occupancy_grid[obstacle_mask] = 100  # 障碍物
 
         # 顶部和天花板层分析：辅助判断
@@ -259,6 +287,13 @@ class PCDToGridMap:
         # 增强自由空间推理：利用全景扫描特性
         if self.panoramic_analysis:
             occupancy_grid = self.enhance_free_space_inference(occupancy_grid, density_maps)
+
+        # 地面主导时强制自由（缓解走廊内部变黑）
+        if 'ground' in density_maps and 'robot' in density_maps:
+            ground_density = density_maps['ground']
+            robot_density = density_maps['robot']
+            dominance = (ground_density >= (self.ground_dominates_ratio * (robot_density + 1))) & (occupancy_grid != 100)
+            occupancy_grid[dominance] = 0
 
         # 可选：根据车辆尺寸对障碍物进行膨胀，提升导航安全裕度
         if self.inflate_radius and self.inflate_radius > 0.0:
@@ -444,6 +479,12 @@ def main():
                        help='垂直连续性阈值(默认0.8)')
     parser.add_argument('--disable-panoramic', action='store_true',
                        help='禁用全景分析模式')
+    parser.add_argument('--enable-vertical-structures', action='store_true',
+                       help='启用垂直结构约束（默认关闭，避免室外高空点误阻塞）')
+    parser.add_argument('--no-require-vertical', action='store_true',
+                       help='不强制要求垂直高度跨度用于障碍判定（更激进，默认需要）')
+    parser.add_argument('--ground-dominates-ratio', type=float, default=2.0,
+                       help='地面点密度主导比率（地面密度 >= 比率×机器人层密度 则判为自由，默认2.0）')
 
     args = parser.parse_args()
 
@@ -471,7 +512,10 @@ def main():
         obstacle_threshold=args.obstacle_thresh,
         vertical_continuity_threshold=args.vertical_thresh,
         panoramic_analysis=not args.disable_panoramic,
-        inflate_radius=args.inflate_radius
+        inflate_radius=args.inflate_radius,
+        use_vertical_structures=args.enable_vertical_structures
+        ,require_vertical_for_obstacle=not args.no-require-vertical
+        ,ground_dominates_ratio=args.ground_dominates_ratio
     )
 
     # 执行转换

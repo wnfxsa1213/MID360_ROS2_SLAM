@@ -1403,9 +1403,14 @@ case "${CMD}" in
         pcd_basename=$(basename "$selected_pcd" .pcd)
         output_file="$MAPS_DIR/${pcd_basename}_gridmap"
 
-        # 执行转换
-        # 根据车辆外宽55cm建议的安全膨胀半径：约0.35m（半宽0.275m+冗余）
-        if python3 "$SCRIPT_DIR/pcd_to_gridmap.py" "$selected_pcd" -o "$output_file" --resolution 0.05 --robot-height 0.8 --inflate-radius 0.35; then
+        # 透传额外参数（从第3个参数起），方便现场调参
+        EXTRA_ARGS=("${@:3}")
+
+        # 执行转换：默认更稳健的阈值与较小膨胀，避免室外高空与窄门被误阻塞
+        # 可通过传入额外参数覆盖：如 --obstacle-thresh 10 --inflate-radius 0.10 --disable-panoramic
+        if python3 "$SCRIPT_DIR/pcd_to_gridmap.py" "$selected_pcd" -o "$output_file" \
+            --resolution 0.05 --robot-height 0.8 --inflate-radius 0.15 --obstacle-thresh 8 \
+            --ground-dominates-ratio 2.0 "${EXTRA_ARGS[@]}"; then
             echo ""
             echo -e "${GREEN}✅ 转换完成!${NC}"
             echo -e "${CYAN}📁 输出文件:${NC}"

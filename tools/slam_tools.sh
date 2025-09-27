@@ -1,20 +1,48 @@
-#!/bin/bash
+#!/usr/bin/env bash
+set -Eeuo pipefail
 
-# FASTLIO2_ROS2 SLAM工具集合脚本
-# 作者: Claude Code Assistant
-# 日期: 2025-09-03
-# 描述: SLAM系统管理和调试工具集合
+# FASTLIO2_ROS2 SLAM工具集合脚本（重构版）
+# 目标：
+#  - 消除硬编码路径，自动定位仓库根目录与工作区
+#  - 统一日志输出与错误处理
+#  - 提升健壮性（环境探测、依赖检查、优雅退出）
 
-# 脚本目录设置
+# ------------------------- 基础与通用 -------------------------
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# 颜色定义
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-CYAN='\033[0;36m'
-NC='\033[0m' # No Color
+# 颜色与日志
+RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; CYAN='\033[0;36m'; NC='\033[0m'
+log() { printf "%b\n" "$*"; }
+info() { log "${BLUE}$*${NC}"; }
+ok()   { log "${GREEN}$*${NC}"; }
+warn() { log "${YELLOW}$*${NC}"; }
+err()  { log "${RED}$*${NC}"; }
+die()  { err "$*"; exit 1; }
+
+# 自动定位仓库根目录（优先 git，再回退到脚本上级）
+ROOT_DIR="$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel 2>/dev/null || true)"
+if [[ -z "${ROOT_DIR}" ]]; then
+  ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+fi
+
+# 工作区路径
+WS_DIR="$ROOT_DIR/ws_livox"
+
+# 进入仓库根目录
+cd "$ROOT_DIR" 2>/dev/null || die "错误: 无法进入SLAM仓库目录: $ROOT_DIR"
+
+# ROS环境加载
+load_ros_env() {
+  # shellcheck disable=SC1091
+  source /opt/ros/humble/setup.bash 2>/dev/null || true
+  if [[ -f "$WS_DIR/install/setup.bash" ]]; then
+    # shellcheck disable=SC1091
+    source "$WS_DIR/install/setup.bash" 2>/dev/null || true
+  else
+    warn "未找到工作区安装环境: $WS_DIR/install/setup.bash (首次使用请先编译)"
+  fi
+  command -v ros2 >/dev/null 2>&1 || die "未检测到 ros2，请确认已安装并正确 source ROS 环境"
+}
 
 show_help() {
     echo "========================================="
@@ -31,7 +59,7 @@ show_help() {
     echo -e "  ${CYAN}status${NC}    - 检查系统状态"
     echo -e "  ${CYAN}restart${NC}   - 重启SLAM系统"
     echo -e "  ${CYAN}monitor${NC}   - 实时监控数据流"
-    echo -e "  ${CYAN}optimize${NC} - 手动触发优化"
+    echo -e "  ${CYAN}optimize${NC} - 手动触发优化（PGO优先，自动回写LIO）"
     echo -e "  ${CYAN}topics${NC}    - 显示所有话题"
     echo -e "  ${CYAN}nodes${NC}     - 显示所有节点"
     echo -e "  ${CYAN}build${NC}     - 编译所有SLAM组件（完整系统）"
@@ -70,40 +98,80 @@ show_help() {
     echo "  $0 test filter  # 运行过滤器测试"
 }
 
-# 确保在正确的目录
-cd "/home/tianyu/codes/Mid360map" 2>/dev/null || {
-    echo -e "${RED}错误: 无法进入SLAM系统目录${NC}"
-    exit 1
-}
+# ------------------------- 功能模块 -------------------------
 
-# 加载ROS2环境
-load_ros_env() {
-    source /opt/ros/humble/setup.bash 2>/dev/null
-    source ws_livox/install/setup.bash 2>/dev/null
+# 等待优化完成（优先通过PGO服务查询）
+wait_optimization_with_pgo() {
+    local timeout_sec=${1:-60}
+    local start_ts=$(date +%s)
+    load_ros_env
+
+    # 如果PGO优化查询服务可用，轮询其结果（更可靠）
+    if ros2 service list 2>/dev/null | grep -q "/pgo/get_optimized_pose"; then
+        echo -e "${CYAN}通过 pgo/get_optimized_pose 轮询优化结果...${NC}"
+        while true; do
+            if timeout 3s ros2 service call /pgo/get_optimized_pose interface/srv/GetOptimizedPose "{}" 2>/dev/null | grep -q "success: true"; then
+                echo -e "${GREEN}PGO已返回优化结果${NC}"
+                break
+            fi
+            now=$(date +%s)
+            if [ $((now-start_ts)) -ge $timeout_sec ]; then
+                echo -e "${YELLOW}等待超时(${timeout_sec}s)，继续后续流程${NC}"
+                break
+            fi
+            echo -e "${BLUE}优化进行中...${NC}"
+            sleep 2
+        done
+        return 0
+    fi
+
+    # 退化：沿用早期话题监测逻辑
+    echo -e "${CYAN}PGO服务不可用，使用话题监测回退策略...${NC}"
+    local i=0
+    while [ $i -lt $timeout_sec ]; do
+        if timeout 2s ros2 topic echo /slam/coordination_metrics --once 2>/dev/null | grep -q "optimization_active.*false" 2>/dev/null; then
+            echo -e "${GREEN}优化完成（协调器指标）${NC}"
+            break
+        fi
+        if timeout 2s ros2 topic echo /fastlio2/cooperation_status --once 2>/dev/null | grep -q "data.*0.0" 2>/dev/null; then
+            echo -e "${GREEN}优化完成（FastLIO2状态）${NC}"
+            break
+        fi
+        if [ $i -gt 30 ]; then
+            echo -e "${BLUE}继续等待优化完成... (${i}/${timeout_sec}s)${NC}"
+            sleep 3
+            i=$((i+3))
+        else
+            echo -e "${BLUE}优化进行中... (${i}/${timeout_sec}s)${NC}"
+            sleep 1
+            i=$((i+1))
+        fi
+    done
 }
 
 # 启动协同SLAM系统
 start_cooperative_slam_system() {
-    echo -e "${BLUE}=== 启动协同SLAM系统 ===${NC}"
+    info "=== 启动协同SLAM系统 ==="
     
     # 检查依赖
     if ! check_slam_dependencies; then
-        echo -e "${RED}❌ 依赖检查失败，无法启动完整系统${NC}"
-        echo -e "${YELLOW}尝试运行：$0 deps 检查缺失的依赖${NC}"
+        err "❌ 依赖检查失败，无法启动完整系统"
+        warn "尝试运行：$0 deps 检查缺失的依赖"
         return 1
     fi
     
     load_ros_env
     
     # 使用协同launch文件启动所有组件
-    echo -e "${CYAN}启动协同SLAM系统（真正的协同工作）...${NC}"
-    echo -e "${YELLOW}包含组件：Livox驱动 + FastLIO2 + PGO + HBA + Localizer + 优化协调器${NC}"
-    echo -e "${YELLOW}协同功能：双向优化反馈，智能协调器调度${NC}"
+    info "启动协同SLAM系统（真正的协同工作）..."
+    warn "包含组件：Livox驱动 + FastLIO2 + PGO + HBA + Localizer + 优化协调器"
+    warn "协同功能：双向优化反馈，智能协调器调度"
 
     ros2 launch fastlio2 cooperative_slam_system.launch.py &
     SLAM_SYSTEM_PID=$!
+    echo $SLAM_SYSTEM_PID > /tmp/slam_coop.pid
     
-    echo -e "${CYAN}等待系统启动...${NC}"
+    info "等待系统启动..."
     sleep 8
     
     # 检查核心组件启动状态
@@ -119,67 +187,93 @@ start_cooperative_slam_system() {
         total=$((total + 1))
         
         if ros2 node list 2>/dev/null | grep -q "$node_name"; then
-            echo -e "${GREEN}✅ $display_name 启动成功${NC}"
+            ok "✅ $display_name 启动成功"
             success=$((success + 1))
         else
-            echo -e "${RED}❌ $display_name 启动失败${NC}"
+            err "❌ $display_name 启动失败"
         fi
     done
     
     echo ""
     if [ $success -eq $total ]; then
-        echo -e "${GREEN}🎉 完整SLAM系统启动成功！($success/$total)${NC}"
-        echo -e "${BLUE}📊 主监控窗口：PGO RViz（显示实时建图+回环检测+轨迹优化）${NC}"
+        ok "🎉 完整SLAM系统启动成功！($success/$total)"
+        info "📊 主监控窗口：PGO RViz（显示实时建图+回环检测+轨迹优化）"
     elif [ $success -gt 0 ]; then
-        echo -e "${YELLOW}⚠️  部分组件启动成功 ($success/$total)${NC}"
-        echo -e "${BLUE}📊 主监控窗口：PGO RViz${NC}"
+        warn "⚠️  部分组件启动成功 ($success/$total)"
+        info "📊 主监控窗口：PGO RViz"
     else
-        echo -e "${RED}❌ 系统启动失败${NC}"
+        err "❌ 系统启动失败"
         return 1
     fi
     
     echo ""
-    echo -e "${BLUE}管理命令:${NC}"
-    echo -e "${BLUE}  状态检查: $0 status${NC}"
-    echo -e "${BLUE}  实时监控: $0 monitor${NC}"
-    echo -e "${BLUE}  保存地图: $0 save${NC}"
+    info "管理命令:"
+    info "  状态检查: $0 status"
+    info "  实时监控: $0 monitor"
+    info "  保存地图: $0 save"
 }
 
 # 停止所有SLAM组件
 stop_all_slam_components() {
-    echo -e "${YELLOW}停止所有SLAM组件...${NC}"
+    warn "停止所有SLAM组件..."
     
-    # 停止ROS节点
-    slam_nodes=("lio_node" "pgo_node" "hba_node" "localizer_node")
-    for node in "${slam_nodes[@]}"; do
-        if ros2 node list 2>/dev/null | grep -q "$node"; then
-            echo -e "${YELLOW}停止 $node...${NC}"
-            ros2 lifecycle set /$node shutdown 2>/dev/null || true
+    # 1) 如果保存了launch的PID，优先干净关闭它及其子进程
+    if [ -f /tmp/slam_coop.pid ]; then
+        PID=$(cat /tmp/slam_coop.pid 2>/dev/null || echo "")
+        if [ -n "$PID" ] && kill -0 "$PID" 2>/dev/null; then
+            warn "停止协同launch (PID: $PID)..."
+            # 先尝试优雅终止
+            kill "$PID" 2>/dev/null || true
+            # 清理其子进程
+            pkill -P "$PID" 2>/dev/null || true
+            sleep 1
+            # 如仍存活则强杀
+            if kill -0 "$PID" 2>/dev/null; then
+                kill -9 "$PID" 2>/dev/null || true
+                pkill -9 -P "$PID" 2>/dev/null || true
+            fi
         fi
+        rm -f /tmp/slam_coop.pid
+    fi
+
+    # 2) 逐类强制关闭所有可能的独立进程（多重保险）
+    patterns=(
+        "livox_ros_driver2_node"
+        "point_cloud_filter_bridge_node"
+        "lio_node"
+        "pgo_node"
+        "hba_node"
+        "localizer_node"
+        "optimization_coordinator"
+        "robot_state_publisher"
+        "static_transform_publisher"
+        "rviz2"
+        "ros2 bag play"
+    )
+    for pat in "${patterns[@]}"; do
+        pkill -f "$pat" 2>/dev/null || true
     done
-    
-    # 强制杀死相关进程
+
+    # 3) 兜底：杀掉残留的launch进程
     pkill -f "ros2 launch.*fastlio2" 2>/dev/null || true
-    pkill -f "ros2 launch.*pgo" 2>/dev/null || true  
+    pkill -f "ros2 launch.*pgo" 2>/dev/null || true
     pkill -f "ros2 launch.*hba" 2>/dev/null || true
     pkill -f "ros2 launch.*localizer" 2>/dev/null || true
-    pkill -f "lio_node" 2>/dev/null || true
-    pkill -f "pgo_node" 2>/dev/null || true
-    pkill -f "hba_node" 2>/dev/null || true
-    pkill -f "localizer_node" 2>/dev/null || true
-    
-    # 调用原有停止脚本
-    if [ -f "tools/stop_slam.sh" ]; then
-        ./tools/stop_slam.sh > /dev/null 2>&1
-    fi
-    
-    sleep 2
-    echo -e "${GREEN}✅ 所有SLAM组件已停止${NC}"
+
+    # 4) 等待节点消失（最多3秒）
+    for i in 1 2 3; do
+        if ! ros2 node list 2>/dev/null | grep -E "(livox|lio_node|pgo_node|hba_node|localizer_node|optimization_coordinator|point_cloud_filter_bridge|robot_state_publisher|static_transform)" >/dev/null; then
+            break
+        fi
+        sleep 1
+    done
+
+    ok "✅ 所有SLAM组件已停止（如仍有残留，请再执行一次 stop）"
 }
 
 # 检查完整SLAM状态
 check_full_slam_status() {
-    echo -e "${CYAN}完整SLAM系统状态检查${NC}"
+    info "完整SLAM系统状态检查"
     echo "=================================="
     
     load_ros_env
@@ -211,31 +305,31 @@ check_full_slam_status() {
         if [ -d "ws_livox/install/$pkg_name" ]; then
             total_expected=$((total_expected + 1))
             if ros2 node list 2>/dev/null | grep -q "$node_name"; then
-                echo -e "  $description: ${GREEN}✅ 运行中${NC}"
+                ok "  $description: ✅ 运行中"
                 active_count=$((active_count + 1))
             else
-                echo -e "  $description: ${RED}❌ 未运行${NC}"
+                err "  $description: ❌ 未运行"
             fi
         else
-            echo -e "  $description: ${YELLOW}⏸  未编译${NC}"
+            warn "  $description: ⏸  未编译"
         fi
     done
     
     echo ""
-    echo -e "${YELLOW}系统状态摘要:${NC}"
+    warn "系统状态摘要:"
     echo "  活跃组件: $active_count/$total_expected"
     
     if [ $active_count -eq $total_expected ] && [ $total_expected -gt 0 ]; then
-        echo -e "  整体状态: ${GREEN}✅ 系统正常运行${NC}"
+        ok "  整体状态: ✅ 系统正常运行"
     elif [ $active_count -gt 0 ]; then
-        echo -e "  整体状态: ${YELLOW}⚠️  部分组件运行${NC}"
+        warn "  整体状态: ⚠️  部分组件运行"
     else
-        echo -e "  整体状态: ${RED}❌ 系统未运行${NC}"
+        err "  整体状态: ❌ 系统未运行"
     fi
     
     # 检查话题活跃度
     echo ""
-    echo -e "${YELLOW}关键话题状态:${NC}"
+    warn "关键话题状态:"
     key_topics=(
         "/livox/lidar:雷达数据"
         "/livox/imu:IMU数据"
@@ -248,23 +342,23 @@ check_full_slam_status() {
         description="${topic_info##*:}"
 
         if timeout 2s ros2 topic hz "$topic" --once 2>/dev/null | grep -q "Hz"; then
-            echo -e "  $description: ${GREEN}✅ 数据流正常${NC}"
+            ok "  $description: ✅ 数据流正常"
         else
-            echo -e "  $description: ${RED}❌ 无数据流${NC}"
+            err "  $description: ❌ 无数据流"
         fi
     done
 
     # 检查协同系统（如果存在）
     if ros2 node list 2>/dev/null | grep -qE "(pgo|hba|localizer|optimization)"; then
         echo ""
-        echo -e "${YELLOW}协同系统状态:${NC}"
+        warn "协同系统状态:"
 
         # 协同服务检查
         coop_services=$(ros2 service list 2>/dev/null | grep -E "(update_pose|sync_state|trigger_optimization)" | wc -l)
         if [ $coop_services -gt 0 ]; then
-            echo -e "  协同服务: ${GREEN}✅ $coop_services 个服务可用${NC}"
+            ok "  协同服务: ✅ $coop_services 个服务可用"
         else
-            echo -e "  协同服务: ${YELLOW}⚠️  无协同服务${NC}"
+            warn "  协同服务: ⚠️  无协同服务"
         fi
 
         # 协同话题检查
@@ -282,9 +376,9 @@ check_full_slam_status() {
             description="${topic_info##*:}"
 
             if timeout 2s ros2 topic hz "$topic" --once 2>/dev/null | grep -q "Hz"; then
-                echo -e "  $description: ${GREEN}✅ 活跃${NC}"
+                ok "  $description: ✅ 活跃"
             else
-                echo -e "  $description: ${YELLOW}⚠️  无数据${NC}"
+                warn "  $description: ⚠️  无数据"
             fi
         done
     fi
@@ -358,12 +452,15 @@ case "$1" in
 
 
     "optimize")
-        echo -e "${CYAN}手动触发协同优化...${NC}"
+        echo -e "${CYAN}手动触发协同优化（PGO→回写LIO→同步轨迹）...${NC}"
         load_ros_env
         echo ""
 
         echo -e "${YELLOW}触发PGO优化...${NC}"
-        ros2 service call /coordinator/trigger_optimization interface/srv/TriggerOptimization "{optimization_level: 1, include_pgo: true, include_hba: false, include_localizer: false, drift_threshold: 0.2, emergency_mode: false}" --timeout 10
+        ros2 service call /coordinator/trigger_optimization interface/srv/TriggerOptimization "{optimization_level: 1, include_pgo: true, include_hba: false, include_localizer: false, drift_threshold: 0.2, emergency_mode: false}" --timeout 10 2>/dev/null || true
+
+        echo -e "${CYAN}等待优化完成...${NC}"
+        wait_optimization_with_pgo 60
         ;;
     
     "topics")
@@ -642,12 +739,22 @@ case "$1" in
         echo -e "${CYAN}启动RViz可视化...${NC}"
         load_ros_env
 
-        RVIZ_CONFIG="ws_livox/install/fastlio2/share/fastlio2/rviz/fastlio2.rviz"
-        if [ -f "$RVIZ_CONFIG" ]; then
-            echo "使用FASTLIO2配置文件启动RViz..."
-            rviz2 -d "$RVIZ_CONFIG" &
+        # 优先使用增强版可视化配置，其次回退到安装目录的标准配置
+        RVIZ_CFG_SRC="ws_livox/src/fastlio2/rviz/enhanced_fastlio2.rviz"
+        RVIZ_CFG_INSTALL_ENH="ws_livox/install/fastlio2/share/fastlio2/rviz/enhanced_fastlio2.rviz"
+        RVIZ_CFG_INSTALL_STD="ws_livox/install/fastlio2/share/fastlio2/rviz/fastlio2.rviz"
+
+        if [ -f "$RVIZ_CFG_SRC" ]; then
+            echo "使用增强版RViz配置(源): $RVIZ_CFG_SRC"
+            rviz2 -d "$RVIZ_CFG_SRC" &
+        elif [ -f "$RVIZ_CFG_INSTALL_ENH" ]; then
+            echo "使用增强版RViz配置(安装): $RVIZ_CFG_INSTALL_ENH"
+            rviz2 -d "$RVIZ_CFG_INSTALL_ENH" &
+        elif [ -f "$RVIZ_CFG_INSTALL_STD" ]; then
+            echo "使用标准RViz配置(安装): $RVIZ_CFG_INSTALL_STD"
+            rviz2 -d "$RVIZ_CFG_INSTALL_STD" &
         else
-            echo "启动默认RViz..."
+            echo "未找到预置RViz配置，启动默认RViz..."
             rviz2 &
         fi
 
@@ -674,32 +781,10 @@ case "$1" in
 
             # 触发一次全面优化以获取最佳地图质量
             echo -e "${YELLOW}触发最终优化...${NC}"
-            ros2 service call /coordinator/trigger_optimization interface/srv/TriggerOptimization "{optimization_level: 2, include_pgo: true, include_hba: true, include_localizer: true, drift_threshold: 0.1, emergency_mode: false}" --timeout 30 2>/dev/null || echo "优化触发完成"
+            ros2 service call /coordinator/trigger_optimization interface/srv/TriggerOptimization "{optimization_level: 2, include_pgo: true, include_hba: true, include_localizer: true, drift_threshold: 0.1, emergency_mode: false}" --timeout 30 2>/dev/null || true
 
             echo -e "${CYAN}等待优化完成...${NC}"
-            # 智能等待：监控优化状态直到完成
-            optimization_timeout=60  # 最长等待60秒
-            for i in $(seq 1 $optimization_timeout); do
-                # 检查多个指标确定优化状态
-                if timeout 2s ros2 topic echo /slam/coordination_metrics --once 2>/dev/null | grep -q "optimization_active.*false" 2>/dev/null; then
-                    echo -e "${GREEN}优化已完成 (协调器状态)${NC}"
-                    break
-                elif timeout 2s ros2 topic echo /fastlio2/cooperation_status --once 2>/dev/null | grep -q "data.*0.0" 2>/dev/null; then
-                    echo -e "${GREEN}优化已完成 (FastLIO2状态)${NC}"
-                    break
-                elif [ $i -gt 30 ]; then
-                    # 超过30秒后降低检查频率
-                    echo -e "${BLUE}继续等待优化完成... (${i}/${optimization_timeout}秒)${NC}"
-                    sleep 3
-                else
-                    echo -e "${BLUE}优化进行中... (${i}/${optimization_timeout}秒)${NC}"
-                    sleep 1
-                fi
-            done
-            
-            # 额外等待2秒确保稳定
-            echo -e "${CYAN}稳定等待...${NC}"
-            sleep 2
+            wait_optimization_with_pgo 60
         fi
         
         # 确保saved_maps目录存在

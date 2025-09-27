@@ -60,6 +60,7 @@ class ConfigGenerator:
             "ws_livox/src/pgo/config/pgo.yaml",
             "ws_livox/src/hba/config/hba.yaml",
             "ws_livox/src/localizer/config/localizer.yaml",
+            "ws_livox/src/point_cloud_filter/config/point_cloud_filter.yaml",
             "ws_livox/src/fastlio2/rviz/enhanced_fastlio2.rviz"
         ]
 
@@ -528,6 +529,86 @@ class ConfigGenerator:
             print(f"✗ 生成Localizer配置失败: {e}")
             return False
 
+    def generate_point_cloud_filter_config(self) -> bool:
+        """生成点云过滤桥接节点的ROS2参数文件 (point_cloud_filter.yaml)
+
+        说明：采用 ROS2 node-scoped 参数结构，便于通过 launch parameters=[path] 直接加载。
+        - 输入默认指向原始话题 /livox/lidar
+        - 输出指向主配置 topics.lidar（通常为 /livox/lidar_filtered）
+        - 动态过滤参数复用 master_config 中 localizer.dynamic_filter 的设置（保持一致性）
+        """
+        try:
+            mc = self.master_config
+
+            # 期望输出话题（供下游使用，如FAST-LIO2）
+            output_topic = mc['topics']['lidar']
+            # 原始输入固定为驱动输出原始话题
+            input_topic = "/livox/lidar"
+
+            # 动态过滤器参数（来自 localizer 配置，保持一致性）
+            df = mc.get('localizer', {}).get('dynamic_filter', {})
+
+            # 兼容字段读取（提供合理默认）
+            def get_df(k, default):
+                return df.get(k, default)
+
+            params = {
+                'point_cloud_filter_bridge': {
+                    'ros__parameters': {
+                        # 话题
+                        'input_topic': input_topic,
+                        'output_topic': output_topic,
+                        'debug_topic': '/point_cloud_filter/debug_cloud',
+                        'stats_topic': '/point_cloud_filter/filter_stats',
+
+                        # 控制
+                        'debug_enabled': False,
+                        'publish_stats': True,
+                        'max_processing_hz': 20.0,
+
+                        # 动态过滤器
+                        'dynamic_filter': {
+                            'debug_enabled': get_df('enable', False) is True,  # 若Localizer启用，则默认打开调试
+                            'motion_threshold': float(get_df('motion_threshold', 0.1)),
+                            'history_size': int(get_df('history_size', 3)),
+                            'stability_threshold': float(get_df('stability_threshold', 0.8)),
+                            'max_time_diff': float(get_df('max_time_diff', 1.0)),
+
+                            'search_radius': float(get_df('search_radius', 0.2)),
+                            'min_neighbors': int(get_df('min_neighbors', 10)),
+                            'normal_consistency_thresh': float(get_df('normal_consistency_thresh', 0.8)),
+                            'density_ratio_thresh': float(get_df('density_ratio_thresh', 0.5)),
+
+                            'downsample_ratio': int(get_df('downsample_ratio', 4)),
+                            'max_points_per_frame': int(get_df('max_points_per_frame', 50000)),
+                            'voxel_size_base': float(get_df('voxel_size_base', 0.05)),
+                        }
+                    }
+                }
+            }
+
+            # 写入文件
+            output_path = self.project_root / "ws_livox/src/point_cloud_filter/config/point_cloud_filter.yaml"
+            with open(output_path, 'w', encoding='utf-8') as f:
+                yaml.dump(params, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
+
+            print(f"✓ 成功生成点云过滤参数: {output_path}")
+
+            # 尝试同步到安装目录（若存在且非符号链接）
+            try:
+                install_cfg = self.project_root / "ws_livox/install/point_cloud_filter/share/point_cloud_filter/config/point_cloud_filter.yaml"
+                if install_cfg.exists() and not install_cfg.is_symlink():
+                    install_cfg.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(output_path, install_cfg)
+                    print(f"  ↳ 已同步到安装目录: {install_cfg}")
+            except Exception as e:
+                print(f"  ⚠ 同步到安装目录失败: {e}")
+
+            return True
+        except Exception as e:
+            print(f"✗ 生成点云过滤参数失败: {e}")
+            return False
+
     def generate_rviz_config(self) -> bool:
         """生成RViz配置文件 (enhanced_fastlio2.rviz)
 
@@ -550,6 +631,8 @@ class ConfigGenerator:
         - /PointCloud22
         - /Path1
         - /Marker1
+        - /Loop Closures1
+        - /HBA Map1
       Splitter Ratio: 0.5
     Tree Height: 1079
   - Class: rviz_common/Selection
@@ -700,6 +783,53 @@ Visualization Manager:
         Reliability Policy: Reliable
         Value: /fastlio2/imu_pose_marker
       Value: true
+    - Class: rviz_default_plugins/MarkerArray
+      Enabled: true
+      Name: "Loop Closures"
+      Namespaces:
+        {{}}
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        Filter size: 10
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: {mc['topics'].get('loop_markers', '/slam/loop_markers')}
+      Value: true
+    - Alpha: 0.6
+      Autocompute Intensity Bounds: true
+      Autocompute Value Bounds:
+        Max Value: 10
+        Min Value: -10
+        Value: true
+      Axis: Z
+      Channel Name: intensity
+      Class: rviz_default_plugins/PointCloud2
+      Color: 255; 255; 0
+      Color Transformer: Intensity
+      Decay Time: 0
+      Enabled: true
+      Invert Rainbow: false
+      Max Color: 255; 255; 255
+      Max Intensity: 237
+      Min Color: 0; 0; 0
+      Min Intensity: 0
+      Name: "HBA Map"
+      Position Transformer: XYZ
+      Selectable: true
+      Size (Pixels): 2
+      Size (m): 0.02
+      Style: Points
+      Topic:
+        Depth: 10
+        Durability Policy: Volatile
+        Filter size: 100
+        History Policy: Keep All
+        Reliability Policy: Reliable
+        Value: {mc['topics'].get('hba_map', '/hba/map_points')}
+      Use Fixed Frame: true
+      Use rainbow: false
+      Value: true
   Enabled: true
   Global Options:
     Background Color: 48; 48; 48
@@ -798,6 +928,15 @@ Window Geometry:
                 f.write(rviz_config)
 
             print(f"✓ 成功生成RViz配置: {output_path}")
+            # 尝试同步到安装目录，便于通过 FindPackageShare 读取最新配置
+            try:
+                install_cfg = self.project_root / "install/fastlio2/share/fastlio2/rviz/enhanced_fastlio2.rviz"
+                if install_cfg.exists() and not install_cfg.is_symlink():
+                    install_cfg.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(output_path, install_cfg)
+                    print(f"  ↳ 已同步到安装目录: {install_cfg}")
+            except Exception as e:
+                print(f"  ⚠ 同步到安装目录失败（可忽略，建议使用 --symlink-install 或重新编译）: {e}")
             return True
 
         except Exception as e:
@@ -830,6 +969,7 @@ Window Geometry:
         success &= self.generate_pgo_config()
         success &= self.generate_hba_config()
         success &= self.generate_localizer_config()
+        success &= self.generate_point_cloud_filter_config()
         success &= self.generate_rviz_config()
 
         print()

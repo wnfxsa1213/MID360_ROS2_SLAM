@@ -66,6 +66,116 @@ class PCDToGridMap:
             print(f"加载PCD文件失败: {e}")
             return None
 
+    def preprocess_points(self, points):
+        """可选的点云预处理：体素下采样 + 统计离群去噪"""
+        if not getattr(self, 'enable_pre_filter', False):
+            return points
+
+        pcd = o3d.geometry.PointCloud()
+        pcd.points = o3d.utility.Vector3dVector(points)
+
+        # 体素下采样
+        voxel = float(getattr(self, 'voxel_size', 0.0) or 0.0)
+        if voxel > 0.0:
+            pcd = pcd.voxel_down_sample(voxel)
+
+        # 统计离群去噪
+        mean_k = int(getattr(self, 'sor_mean_k', 0) or 0)
+        if mean_k > 0:
+            std_ratio = float(getattr(self, 'sor_std_ratio', 1.0) or 1.0)
+            cl, ind = pcd.remove_statistical_outlier(nb_neighbors=mean_k, std_ratio=std_ratio)
+            pcd = pcd.select_by_index(ind)
+
+        filtered = np.asarray(pcd.points)
+        print(f"预处理后剩余 {len(filtered)} 个点 (原始 {len(points)})")
+        return filtered
+
+    @staticmethod
+    def _quat_to_rot(qw, qx, qy, qz):
+        """四元数转旋转矩阵 (w, x, y, z)"""
+        norm = np.sqrt(qw*qw + qx*qx + qy*qy + qz*qz)
+        if norm == 0:
+            return np.eye(3)
+        qw, qx, qy, qz = qw/norm, qx/norm, qy/norm, qz/norm
+        R = np.array([
+            [1 - 2*(qy*qy + qz*qz), 2*(qx*qy - qz*qw),     2*(qx*qz + qy*qw)],
+            [2*(qx*qy + qz*qw),     1 - 2*(qx*qx + qz*qz), 2*(qy*qz - qx*qw)],
+            [2*(qx*qz - qy*qw),     2*(qy*qz + qx*qw),     1 - 2*(qx*qx + qy*qy)]
+        ], dtype=np.float64)
+        return R
+
+    def assemble_from_patches(self, poses_file: Path, patches_dir: Path):
+        """从 PGO patches + poses.txt 组装全局点云
+
+        poses.txt 每行: patch_name.pcd tx ty tz qw qx qy qz
+        patches 为 PCL PointXYZI，仅使用 x,y,z
+        """
+        if not poses_file.exists():
+            print(f"错误: poses文件不存在: {poses_file}")
+            return None
+        if not patches_dir.exists():
+            print(f"错误: patches目录不存在: {patches_dir}")
+            return None
+
+        all_pts = []
+        loaded = 0
+        with open(poses_file, 'r', encoding='utf-8') as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith('#'):
+                    continue
+                parts = line.split()
+                if len(parts) != 8:
+                    print(f"警告: poses行格式不正确，跳过: {line}")
+                    continue
+                name, tx, ty, tz, qw, qx, qy, qz = parts[0], *map(float, parts[1:])
+                patch_path = patches_dir / name
+                if not patch_path.exists():
+                    print(f"警告: 未找到patch: {patch_path}")
+                    continue
+                try:
+                    p = o3d.io.read_point_cloud(str(patch_path))
+                    pts = np.asarray(p.points)
+                    if pts.size == 0:
+                        continue
+                    R = self._quat_to_rot(qw, qx, qy, qz)
+                    t = np.array([tx, ty, tz], dtype=np.float64)
+                    pts_w = (pts @ R.T) + t
+                    all_pts.append(pts_w)
+                    loaded += 1
+                except Exception as e:
+                    print(f"警告: 加载或变换patch失败 {patch_path}: {e}")
+                    continue
+
+        if not all_pts:
+            print("错误: 未能从patches组装出点云")
+            return None
+
+        cat = np.vstack(all_pts)
+        print(f"已从 {loaded} 个patch组装点云，共 {len(cat)} 点")
+        return cat
+
+    @staticmethod
+    def load_hba_poses(hba_file: Path):
+        """加载HBA轨迹: 每行 tx ty tz qw qx qy qz"""
+        if not hba_file or not hba_file.exists():
+            return None
+        arr = []
+        with open(hba_file, 'r', encoding='utf-8') as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith('#'):
+                    continue
+                parts = line.split()
+                if len(parts) != 7:
+                    print(f"警告: HBA行格式不正确，跳过: {line}")
+                    continue
+                tx, ty, tz, qw, qx, qy, qz = map(float, parts)
+                arr.append((tx, ty, tz, qw, qx, qy, qz))
+        if not arr:
+            return None
+        return np.array(arr, dtype=np.float64)
+
     def analyze_height_layers(self, points):
         """多层高度分析：利用MID360全景扫描特性"""
         layer_points = {}
@@ -304,6 +414,31 @@ class PCDToGridMap:
             inflated = cv2.dilate(obstacle_binary, kernel, iterations=1)
             occupancy_grid[inflated == 1] = 100
 
+        # 可选：障碍开运算与小连通域清理，减少走廊内部黑点/毛刺
+        obstacle_open_iters = getattr(self, 'obstacle_open_iters', 0)
+        min_obstacle_area = getattr(self, 'min_obstacle_area', 0)
+        if obstacle_open_iters > 0 or (min_obstacle_area and min_obstacle_area > 0):
+            obs = (occupancy_grid == 100).astype(np.uint8)
+            if obstacle_open_iters > 0:
+                k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+                obs = cv2.morphologyEx(obs, cv2.MORPH_OPEN, k, iterations=int(obstacle_open_iters))
+
+            if min_obstacle_area and min_obstacle_area > 0:
+                num, labels = cv2.connectedComponents(obs, connectivity=8)
+                areas = np.bincount(labels.ravel())
+                keep = np.zeros(num, dtype=bool)  # 0: 背景，默认不保留
+                for i in range(1, num):
+                    if areas[i] >= int(min_obstacle_area):
+                        keep[i] = True
+                obs = np.where(labels > 0, keep[labels].astype(np.uint8), 0)
+
+            # 将清理后的障碍写回
+            prev_obstacles = (occupancy_grid == 100)
+            occupancy_grid[obs == 1] = 100
+            # 对被清理掉的原障碍点设为未知（更保守），由后续策略决定是否变为自由
+            cleared = (obs == 0) & prev_obstacles
+            occupancy_grid[cleared] = -1
+
         return occupancy_grid
 
     def enhance_free_space_inference(self, occupancy_grid, density_maps):
@@ -440,11 +575,33 @@ class PCDToGridMap:
         """执行PCD到栅格地图的完整转换流程"""
         print(f"开始转换: {pcd_file} -> {output_file}")
 
-        # 加载PCD文件
-        points = self.load_pcd(pcd_file)
+        # 选择点云来源：优先使用 patches+poses 组装，其次直接加载PCD
+        points = None
+        if getattr(self, 'patches_dir', None) and getattr(self, 'poses_file', None):
+            points = self.assemble_from_patches(self.poses_file, self.patches_dir)
+        if points is None:
+            # 回退为直接加载PCD
+            points = self.load_pcd(pcd_file)
         if points is None or len(points) == 0:
             print("错误: 无法加载PCD文件或文件为空")
             return False
+
+        # 根据HBA轨迹裁剪ROI（可选）
+        if getattr(self, 'hba_file', None) and getattr(self, 'roi_from_hba', False):
+            hba = self.load_hba_poses(self.hba_file)
+            if hba is not None:
+                tx = hba[:, 0]; ty = hba[:, 1]
+                buf = float(getattr(self, 'roi_buffer', 2.0) or 2.0)
+                xmin, xmax = np.min(tx) - buf, np.max(tx) + buf
+                ymin, ymax = np.min(ty) - buf, np.max(ty) + buf
+                m = (points[:, 0] >= xmin) & (points[:, 0] <= xmax) & (points[:, 1] >= ymin) & (points[:, 1] <= ymax)
+                kept = int(np.count_nonzero(m))
+                print(f"ROI裁剪: [{xmin:.2f},{xmax:.2f}]x[{ymin:.2f},{ymax:.2f}], 保留 {kept}/{len(points)} 点")
+                if kept > 0:
+                    points = points[m]
+
+        # 点云预处理（可选）
+        points = self.preprocess_points(points)
 
         # 创建占用栅格地图
         occupancy_grid, metadata = self.create_occupancy_grid(points)
@@ -457,7 +614,7 @@ class PCDToGridMap:
 
 def main():
     parser = argparse.ArgumentParser(description='将PCD点云地图转换为栅格地图')
-    parser.add_argument('pcd_file', help='输入PCD文件路径')
+    parser.add_argument('pcd_file', help='输入PCD文件路径（若提供 --patches-dir 与 --poses-file，将优先使用patches组装）')
     parser.add_argument('-o', '--output', help='输出文件路径（不包含扩展名）')
     parser.add_argument('-r', '--resolution', type=float, default=0.05,
                        help='栅格分辨率(米/像素，默认0.05)')
@@ -485,6 +642,24 @@ def main():
                        help='不强制要求垂直高度跨度用于障碍判定（更激进，默认需要）')
     parser.add_argument('--ground-dominates-ratio', type=float, default=2.0,
                        help='地面点密度主导比率（地面密度 >= 比率×机器人层密度 则判为自由，默认2.0）')
+    parser.add_argument('--enable-pre-filter', action='store_true',
+                       help='启用点云预处理（体素下采样+统计离群去噪）')
+    parser.add_argument('--voxel-size', type=float, default=0.0,
+                       help='体素下采样尺寸(米)，0表示不下采样')
+    parser.add_argument('--sor-mean-k', type=int, default=0,
+                       help='统计离群均值邻域K，0表示不启用')
+    parser.add_argument('--sor-std-ratio', type=float, default=1.0,
+                       help='统计离群标准差系数')
+    parser.add_argument('--obstacle-open-iters', type=int, default=0,
+                       help='障碍图开运算迭代次数(默认0=不启用)')
+    parser.add_argument('--min-obstacle-area', type=int, default=0,
+                       help='障碍最小连通域像素数，小于则清理(默认0=不启用)')
+    # PGO patches 组装与 HBA ROI
+    parser.add_argument('--patches-dir', type=str, default='', help='PGO输出的patches目录')
+    parser.add_argument('--poses-file', type=str, default='', help='poses.txt路径；每行: name.pcd tx ty tz qw qx qy qz')
+    parser.add_argument('--hba-poses', type=str, default='', help='HBA轨迹文件；每行: tx ty tz qw qx qy qz')
+    parser.add_argument('--roi-from-hba', action='store_true', help='使用HBA轨迹的包围盒作为ROI裁剪点云')
+    parser.add_argument('--roi-buffer', type=float, default=2.0, help='HBA ROI缓冲(米)，默认2.0')
 
     args = parser.parse_args()
 
@@ -514,9 +689,23 @@ def main():
         panoramic_analysis=not args.disable_panoramic,
         inflate_radius=args.inflate_radius,
         use_vertical_structures=args.enable_vertical_structures
-        ,require_vertical_for_obstacle=not args.no-require-vertical
+        ,require_vertical_for_obstacle=not args.no_require_vertical
         ,ground_dominates_ratio=args.ground_dominates_ratio
     )
+
+    # 运行时参数（不扩展构造签名，直接设置）
+    converter.enable_pre_filter = args.enable_pre_filter
+    converter.voxel_size = args.voxel_size
+    converter.sor_mean_k = args.sor_mean_k
+    converter.sor_std_ratio = args.sor_std_ratio
+    converter.obstacle_open_iters = args.obstacle_open_iters
+    converter.min_obstacle_area = args.min_obstacle_area
+    # patches/HBA 配置
+    converter.patches_dir = Path(args.patches_dir) if args.patches_dir else None
+    converter.poses_file = Path(args.poses_file) if args.poses_file else None
+    converter.hba_file = Path(args.hba_poses) if args.hba_poses else None
+    converter.roi_from_hba = bool(args.roi_from_hba)
+    converter.roi_buffer = args.roi_buffer
 
     # 执行转换
     success = converter.convert(pcd_file, output_file)

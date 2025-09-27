@@ -482,7 +482,7 @@ case "${CMD}" in
             SLAM_SYSTEM_PID=$!
             echo $SLAM_SYSTEM_PID > /tmp/slam_coop.pid
             ok "🎬 协同SLAM已启动（回放模式），PID=$SLAM_SYSTEM_PID"
-            # 设置退出清理trap
+            # 清理函数与信号处理（不要在EXIT时清理，以免立刻杀掉后台进程）
             cleanup() {
                 if [[ -f /tmp/slam_bag.pid ]]; then
                     BAGPID=$(cat /tmp/slam_bag.pid 2>/dev/null || echo "");
@@ -495,11 +495,12 @@ case "${CMD}" in
                     rm -f /tmp/slam_coop.pid
                 fi
             }
-            trap cleanup EXIT INT TERM
+            # 仅在中断/终止信号时清理，避免脚本自然返回时提前杀进程
+            trap cleanup INT TERM
 
             if [[ -n "$BAG" && "$AUTO_PLAY" == "false" ]]; then
                 # 构造 ros2 bag play 命令，附带 topics 与 remaps
-                bag_cmd=(ros2 bag play "$BAG" --rate "$RATE")
+                bag_cmd=(ros2 bag play "$BAG" --rate "$RATE" --clock)
                 if [[ "$LOOP" == "true" ]]; then bag_cmd+=(--loop); fi
                 if [[ -n "$START_OFFSET" ]]; then bag_cmd+=(--start-offset "$START_OFFSET"); fi
                 if [[ -n "$TOPICS" ]]; then
@@ -526,6 +527,12 @@ case "${CMD}" in
             else
                 warn "使用 'ros2 bag play <dir>' 可手动回放；或通过 --bag 自动回放"
             fi
+
+            # 前台等待，避免脚本立即退出导致清理触发
+            echo -e "${YELLOW}按 Ctrl+C 停止回放并关闭SLAM${NC}"
+            # 等待协同系统launch退出（正常或被中断），随后执行清理
+            wait "$SLAM_SYSTEM_PID" 2>/dev/null || true
+            cleanup
         else
             echo -e "${GREEN}启动完整SLAM系统 (所有可用组件)...${NC}"
             start_cooperative_slam_system
@@ -922,7 +929,12 @@ case "${CMD}" in
         # 使用一键保存脚本（优先）
         if [ -f "tools/save_maps_bundle.py" ]; then
             echo -e "${CYAN}调用一键保存工具 (LIO/PGO/HBA)...${NC}"
-            python3 tools/save_maps_bundle.py -o saved_maps
+            # 若HBA节点在运行，则顺带触发一次细化并等待片刻再保存轨迹
+            if ros2 node list 2>/dev/null | grep -q "hba_node"; then
+                python3 tools/save_maps_bundle.py -o saved_maps --hba-refine --hba-wait-seconds 30
+            else
+                python3 tools/save_maps_bundle.py -o saved_maps
+            fi
             rc=$?
         elif [ -f "tools/save_map_simple.py" ]; then
             echo -e "${YELLOW}回退到简化保存工具 (仅LIO)...${NC}"

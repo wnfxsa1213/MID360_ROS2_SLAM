@@ -31,13 +31,20 @@ WS_DIR="$ROOT_DIR/ws_livox"
 # 进入仓库根目录
 cd "$ROOT_DIR" 2>/dev/null || die "错误: 无法进入SLAM仓库目录: $ROOT_DIR"
 
+# 安全 source（避免 set -u 触发未绑定变量错误）
+source_safe() {
+  # $1: 文件路径
+  set +u
+  # shellcheck disable=SC1090
+  source "$1" 2>/dev/null || true
+  set -u
+}
+
 # ROS环境加载
 load_ros_env() {
-  # shellcheck disable=SC1091
-  source /opt/ros/humble/setup.bash 2>/dev/null || true
+  source_safe "/opt/ros/humble/setup.bash"
   if [[ -f "$WS_DIR/install/setup.bash" ]]; then
-    # shellcheck disable=SC1091
-    source "$WS_DIR/install/setup.bash" 2>/dev/null || true
+    source_safe "$WS_DIR/install/setup.bash"
   else
     warn "未找到工作区安装环境: $WS_DIR/install/setup.bash (首次使用请先编译)"
   fi
@@ -523,7 +530,7 @@ case "$1" in
                 exit 1
             fi
             # 每次编译后立即source环境，确保后续包能找到依赖
-            source install/setup.bash
+            source_safe install/setup.bash
             echo -e "${GREEN}✓ ${pkg}编译成功${NC}"
         done
         

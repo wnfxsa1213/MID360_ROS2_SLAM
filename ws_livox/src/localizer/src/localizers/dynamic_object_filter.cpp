@@ -9,6 +9,7 @@
 #include <execution>
 #include <cmath>
 #include <iomanip>
+#include <sstream>
 
 namespace localizers {
 
@@ -49,9 +50,15 @@ DynamicObjectFilter::DynamicObjectFilter(const DynamicFilterConfig& config)
 
 CloudType::Ptr DynamicObjectFilter::filterDynamicObjects(const CloudType::Ptr& input_cloud,
                                                         double timestamp) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    
-    auto start_time = std::chrono::high_resolution_clock::now();
+  std::lock_guard<std::mutex> lock(mutex_);
+  
+  auto start_time = std::chrono::high_resolution_clock::now();
+  if (debug_mode_) {
+    std::ostringstream ss;
+    ss << "[filter] start, input_size=" << (input_cloud ? input_cloud->size() : 0)
+       << ", ts=" << std::fixed << std::setprecision(6) << timestamp;
+    debugLog(ss.str());
+  }
     
     // 输入验证
     if (!validateInput(input_cloud, timestamp)) {
@@ -61,25 +68,63 @@ CloudType::Ptr DynamicObjectFilter::filterDynamicObjects(const CloudType::Ptr& i
         return std::make_shared<CloudType>();
     }
     
-    try {
-        // 1. 预处理 - 降采样
-        CloudType::Ptr processed_cloud = downsampleCloud(input_cloud);
-        
-        if (processed_cloud->empty()) {
-            if (debug_mode_) {
-                debugLog("降采样后点云为空");
-            }
-            return std::make_shared<CloudType>();
-        }
-        
-        // 2. 更新历史数据
-        updateHistory(processed_cloud, timestamp);
-        
-        // 3. 检测动态点
-        std::vector<uint8_t> dynamic_mask = detectDynamicPoints(processed_cloud, timestamp);
-        
-        // 4. 创建过滤后的点云和动态点云
-        CloudType::Ptr filtered_cloud = createFilteredCloud(processed_cloud, dynamic_mask);
+  try {
+    // 1. 预处理 - 降采样
+    auto t0 = std::chrono::high_resolution_clock::now();
+    CloudType::Ptr processed_cloud = downsampleCloud(input_cloud);
+    auto t1 = std::chrono::high_resolution_clock::now();
+    double t_down_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+    if (debug_mode_) {
+      std::ostringstream ss;
+      ss << "[filter] downsampled_size=" << (processed_cloud ? processed_cloud->size() : 0)
+         << ", time_ms=" << std::fixed << std::setprecision(2) << t_down_ms;
+      debugLog(ss.str());
+    }
+    
+    if (processed_cloud->empty()) {
+      if (debug_mode_) {
+        debugLog("降采样后点云为空");
+      }
+      return std::make_shared<CloudType>();
+    }
+    
+    // 2. 更新历史数据
+    t0 = std::chrono::high_resolution_clock::now();
+    updateHistory(processed_cloud, timestamp);
+    t1 = std::chrono::high_resolution_clock::now();
+    double t_hist_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+    if (debug_mode_) {
+      std::ostringstream ss;
+      ss << "[filter] history_frames=" << cloud_history_.size()
+         << ", time_ms=" << std::fixed << std::setprecision(2) << t_hist_ms;
+      debugLog(ss.str());
+    }
+    
+    // 3. 检测动态点
+    t0 = std::chrono::high_resolution_clock::now();
+    std::vector<uint8_t> dynamic_mask = detectDynamicPoints(processed_cloud, timestamp);
+    t1 = std::chrono::high_resolution_clock::now();
+    double t_det_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+    if (debug_mode_) {
+      size_t dyn_cnt = std::count(dynamic_mask.begin(), dynamic_mask.end(), 1);
+      std::ostringstream ss;
+      ss << "[filter] detect_dynamic done, dyn_cnt=" << dyn_cnt
+         << "/" << dynamic_mask.size()
+         << ", time_ms=" << std::fixed << std::setprecision(2) << t_det_ms;
+      debugLog(ss.str());
+    }
+    
+    // 4. 创建过滤后的点云和动态点云
+    t0 = std::chrono::high_resolution_clock::now();
+    CloudType::Ptr filtered_cloud = createFilteredCloud(processed_cloud, dynamic_mask);
+    t1 = std::chrono::high_resolution_clock::now();
+    double t_make_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+    if (debug_mode_) {
+      std::ostringstream ss;
+      ss << "[filter] build_filtered size=" << (filtered_cloud ? filtered_cloud->size() : 0)
+         << ", time_ms=" << std::fixed << std::setprecision(2) << t_make_ms;
+      debugLog(ss.str());
+    }
 
         // 创建动态点云用于可视化调试
         last_dynamic_cloud_->clear();
@@ -98,11 +143,13 @@ CloudType::Ptr DynamicObjectFilter::filterDynamicObjects(const CloudType::Ptr& i
         size_t dynamic_count = std::count(dynamic_mask.begin(), dynamic_mask.end(), 1);
         updateStatistics(processed_cloud->size(), dynamic_count, processing_time_ms);
         
-        if (debug_mode_) {
-            debugLog("过滤完成，输入点数: " + std::to_string(input_cloud->size()) + 
-                    ", 输出点数: " + std::to_string(filtered_cloud->size()) +
-                    ", 处理时间: " + std::to_string(processing_time_ms) + "ms");
-        }
+    if (debug_mode_) {
+      std::ostringstream ss;
+      ss << "[filter] done, in=" << input_cloud->size()
+         << ", out=" << filtered_cloud->size()
+         << ", total_ms=" << std::fixed << std::setprecision(2) << processing_time_ms;
+      debugLog(ss.str());
+    }
         
         return filtered_cloud;
         
@@ -126,33 +173,57 @@ std::future<CloudType::Ptr> DynamicObjectFilter::filterDynamicObjectsAsync(
 
 std::vector<uint8_t> DynamicObjectFilter::detectDynamicPoints(const CloudType::Ptr& cloud,
                                                              double timestamp) {
-    std::vector<uint8_t> dynamic_mask(cloud->size(), 0);
-    
-    if (cloud_history_.size() < 2) {
-        // 历史数据不足，保守策略：认为所有点都是静态的
-        return dynamic_mask;
+  std::vector<uint8_t> dynamic_mask(cloud->size(), 0);
+  
+  if (cloud_history_.size() < 2) {
+    // 历史数据不足，保守策略：认为所有点都是静态的
+    if (debug_mode_) {
+      debugLog("[detect] history_frames<2, skip dynamic detection (all static)");
     }
-    
-    // 1. 计算时间一致性信息
-    std::vector<PointTemporalInfo> temporal_info = computeTemporalInfo(cloud, timestamp);
+    return dynamic_mask;
+  }
+  
+  // 1. 计算时间一致性信息
+  auto t0 = std::chrono::high_resolution_clock::now();
+  std::vector<PointTemporalInfo> temporal_info = computeTemporalInfo(cloud, timestamp);
+  auto t1 = std::chrono::high_resolution_clock::now();
+  double t_temporal_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+  if (debug_mode_) {
+    std::ostringstream ss;
+    ss << "[detect] temporal info built, points=" << cloud->size()
+       << ", frames=" << cloud_history_.size()
+       << ", time_ms=" << std::fixed << std::setprecision(2) << t_temporal_ms;
+    debugLog(ss.str());
+  }
     
     // 2. 基于时间一致性的初步筛选
     std::vector<uint8_t> temporal_candidates(cloud->size(), 0);
     
-    // 使用并行算法提高性能
-    std::for_each(std::execution::par_unseq, 
-                  temporal_info.begin(), temporal_info.end(),
-                  [&](const auto& info_pair) {
-        size_t idx = &info_pair - &temporal_info[0];
-        float stability = computeStabilityScore(info_pair);
-        
-        if (stability < config_.stability_threshold) {
-            temporal_candidates[idx] = 1;
-        }
-    });
+  for (size_t idx = 0; idx < temporal_info.size(); ++idx) {
+    float stability = computeStabilityScore(temporal_info[idx]);
+    if (stability < config_.stability_threshold) {
+      temporal_candidates[idx] = 1;
+    }
+  }
+  if (debug_mode_) {
+    size_t cand = std::count(temporal_candidates.begin(), temporal_candidates.end(), 1);
+    std::ostringstream ss;
+    ss << "[detect] temporal candidates=" << cand;
+    debugLog(ss.str());
+  }
     
     // 3. 几何一致性验证
-    dynamic_mask = geometricConsistencyCheck(cloud, temporal_candidates);
+  t0 = std::chrono::high_resolution_clock::now();
+  dynamic_mask = geometricConsistencyCheck(cloud, temporal_candidates);
+  t1 = std::chrono::high_resolution_clock::now();
+  double t_geom_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+  if (debug_mode_) {
+    size_t dyn = std::count(dynamic_mask.begin(), dynamic_mask.end(), 1);
+    std::ostringstream ss;
+    ss << "[detect] geometric checked, dynamic=" << dyn
+       << ", time_ms=" << std::fixed << std::setprecision(2) << t_geom_ms;
+    debugLog(ss.str());
+  }
     
     return dynamic_mask;
 }
@@ -161,25 +232,31 @@ std::vector<uint8_t> DynamicObjectFilter::detectDynamicPoints(const CloudType::P
 
 std::vector<PointTemporalInfo> DynamicObjectFilter::computeTemporalInfo(
     const CloudType::Ptr& cloud, double timestamp) {
-    
-    std::vector<PointTemporalInfo> temporal_info(cloud->size());
-    
-    if (cloud_history_.empty()) {
-        return temporal_info;
+  
+  std::vector<PointTemporalInfo> temporal_info(cloud->size());
+  
+  if (cloud_history_.empty()) {
+    if (debug_mode_) {
+      debugLog("[temporal] empty history");
     }
+    return temporal_info;
+  }
     
     // 建立当前点云的KD树
     kdtree_.setInputCloud(cloud);
     
     // 对于每个历史帧，寻找对应点并计算运动信息
-    for (size_t hist_idx = 0; hist_idx < cloud_history_.size(); ++hist_idx) {
-        const auto& hist_cloud = cloud_history_[hist_idx];
-        double hist_timestamp = timestamp_history_[hist_idx];
-        
-        // 时间差检查
-        if (std::abs(timestamp - hist_timestamp) > config_.max_time_diff) {
-            continue;
-        }
+  for (size_t hist_idx = 0; hist_idx < cloud_history_.size(); ++hist_idx) {
+    const auto& hist_cloud = cloud_history_[hist_idx];
+    double hist_timestamp = timestamp_history_[hist_idx];
+    
+    // 时间差检查
+    if (std::abs(timestamp - hist_timestamp) > config_.max_time_diff) {
+      if (debug_mode_) {
+        debugLog("[temporal] skip history frame due to time_diff");
+      }
+      continue;
+    }
         
         // 寻找对应点
         std::vector<int> correspondence = findCorrespondingPoints(cloud, hist_cloud);
@@ -195,7 +272,7 @@ std::vector<PointTemporalInfo> DynamicObjectFilter::computeTemporalInfo(
         }
     }
     
-    return temporal_info;
+  return temporal_info;
 }
 
 float DynamicObjectFilter::computeStabilityScore(const PointTemporalInfo& info) const {
@@ -328,46 +405,43 @@ std::vector<uint8_t> DynamicObjectFilter::geometricConsistencyCheck(
         return final_mask;
     }
     
-    // 建立KD树用于邻域搜索
-    kdtree_.setInputCloud(cloud);
+    // 使用局部KD树（避免在并行中访问共享KD树导致未定义行为）
+    pcl::KdTreeFLANN<PointType> local_kdtree;
+    local_kdtree.setInputCloud(cloud);
     
-    // 并行处理每个候选动态点
-    std::for_each(std::execution::par_unseq,
-                  final_mask.begin(), final_mask.end(),
-                  [&](auto& is_dynamic_ref) {
-        size_t idx = &is_dynamic_ref - &final_mask[0];
-        
+    // 顺序处理每个候选动态点，确保稳定性。必要时可改为分块并行并加互斥保护。
+    for (size_t idx = 0; idx < final_mask.size(); ++idx) {
         if (!dynamic_candidates[idx]) {
-            return; // 不是候选点，跳过
+            continue; // 不是候选点，跳过
         }
-        
+
         // 邻域搜索
         std::vector<int> neighbor_indices;
         std::vector<float> neighbor_distances;
-        
-        int found_neighbors = kdtree_.radiusSearch(
+
+        int found_neighbors = local_kdtree.radiusSearch(
             cloud->points[idx], config_.search_radius,
             neighbor_indices, neighbor_distances);
-            
+
         if (found_neighbors < config_.min_neighbors) {
-            is_dynamic_ref = 0; // 邻居太少，可能是噪点，认为是静态
-            return;
+            final_mask[idx] = 0; // 邻居太少，可能是噪点，认为是静态
+            continue;
         }
-        
+
         // 分析密度特征
         DensityFeatures density_features = analyzeDensityFeatures(cloud, idx);
-        
+
         // 法向量一致性检查
         const auto& current_normal = normals->points[idx];
         float normal_consistency_sum = 0.0f;
         int valid_normal_count = 0;
-        
+
         for (int neighbor_idx : neighbor_indices) {
             if (neighbor_idx != static_cast<int>(idx) && 
                 neighbor_idx < static_cast<int>(normals->size())) {
-                
+
                 const auto& neighbor_normal = normals->points[neighbor_idx];
-                
+
                 // 检查法向量有效性
                 if (std::isfinite(current_normal.normal_x) && 
                     std::isfinite(current_normal.normal_y) &&
@@ -375,40 +449,40 @@ std::vector<uint8_t> DynamicObjectFilter::geometricConsistencyCheck(
                     std::isfinite(neighbor_normal.normal_x) &&
                     std::isfinite(neighbor_normal.normal_y) &&
                     std::isfinite(neighbor_normal.normal_z)) {
-                    
+
                     Eigen::Vector3f n1(current_normal.normal_x, 
                                        current_normal.normal_y, 
                                        current_normal.normal_z);
                     Eigen::Vector3f n2(neighbor_normal.normal_x, 
                                        neighbor_normal.normal_y, 
                                        neighbor_normal.normal_z);
-                    
+
                     float dot_product = std::abs(n1.dot(n2));
                     normal_consistency_sum += dot_product;
                     valid_normal_count++;
                 }
             }
         }
-        
+
         // 几何一致性决策
         bool is_geometrically_consistent = true;
-        
+
         if (valid_normal_count > 0) {
             float avg_normal_consistency = normal_consistency_sum / valid_normal_count;
             if (avg_normal_consistency < config_.normal_consistency_thresh) {
                 is_geometrically_consistent = false;
             }
         }
-        
+
         // 密度一致性检查
         if (density_features.density_variance > config_.density_ratio_thresh) {
             is_geometrically_consistent = false;
         }
-        
+
         // 最终决策：只有时间和几何都认为是动态的点才标记为动态
-        is_dynamic_ref = (dynamic_candidates[idx] && !is_geometrically_consistent) ? 1 : 0;
-    });
-    
+        final_mask[idx] = (dynamic_candidates[idx] && !is_geometrically_consistent) ? 1 : 0;
+    }
+
     return final_mask;
 }
 
@@ -732,12 +806,14 @@ void DynamicObjectFilter::setDebugMode(bool enable) {
 
 void DynamicObjectFilter::updateStatistics(size_t total_points, size_t dynamic_points, 
                                            double processing_time_ms) {
+    // 注意：filterDynamicObjects 已持有 mutex_，此处不能再次加锁
+    // 不可调用 getMemoryUsageMB()（内部会再次尝试加锁导致死锁）
     last_stats_.total_points = total_points;
     last_stats_.dynamic_points = dynamic_points;
     last_stats_.static_points = total_points - dynamic_points;
     last_stats_.processing_time_ms = processing_time_ms;
     last_stats_.history_frames = cloud_history_.size();
-    last_stats_.memory_usage_mb = getMemoryUsageMB();
+    last_stats_.memory_usage_mb = calculateMemoryUsage() / (1024.0 * 1024.0);
     last_stats_.updateFilterRatio();
 }
 

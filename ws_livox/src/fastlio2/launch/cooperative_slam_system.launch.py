@@ -93,19 +93,24 @@ def generate_launch_description():
         ),
 
         # === 点云过滤桥接节点 ===
+        # 说明：ROS2 参数文件应以 YAML 文件路径传入（或使用 node-name/ros__parameters 结构）。
+        # 之前这里错误地以 "config_path" 字段传入，节点并不会读取此自定义键，导致 YAML 未生效。
+        # 修复：将 YAML 路径作为参数文件传入，并保留可覆盖的显式参数。
         launch_ros.actions.Node(
             package="point_cloud_filter",
             executable="point_cloud_filter_bridge_node",
             name="point_cloud_filter_bridge",
             output="screen",
-            parameters=[{
-                "config_path": point_cloud_filter_config_path,
-                "input_topic": "/livox/lidar",
-                "output_topic": "/livox/lidar_filtered",
-                "debug_enabled": False,
-                "max_processing_hz": 10.0,
-                'use_sim_time': use_sim_time,
-            }],
+            parameters=[
+                point_cloud_filter_config_path,  # 正确传入参数文件路径
+                {
+                    "input_topic": "/livox/lidar",
+                    "output_topic": "/livox/lidar_filtered",
+                    "debug_enabled": False,
+                    "max_processing_hz": 10.0,
+                    'use_sim_time': use_sim_time,
+                }
+            ],
             condition=UnlessCondition(use_bag)
         ),
 

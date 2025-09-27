@@ -103,6 +103,18 @@ bool PointCloudFilterBridge::initializeDynamicFilter() {
         // 创建过滤器实例
         dynamic_filter_ = std::make_unique<localizers::DynamicObjectFilter>(filter_config_);
 
+        // 同步调试模式：如果节点开启了debug_enabled，则同时打开动态过滤器的详细调试
+        try {
+            bool df_debug = false;
+            if (this->has_parameter("dynamic_filter.debug_enabled")) {
+                df_debug = this->get_parameter("dynamic_filter.debug_enabled").as_bool();
+            }
+            // 若未单独指定 dynamic_filter.debug_enabled，则复用节点的 debug_enabled
+            dynamic_filter_->setDebugMode(df_debug || debug_enabled_);
+        } catch (...) {
+            dynamic_filter_->setDebugMode(debug_enabled_);
+        }
+
         RCLCPP_INFO(this->get_logger(), 
             "动态过滤器初始化完成:\n"
             "  运动阈值: %.3f m\n"
@@ -113,6 +125,9 @@ bool PointCloudFilterBridge::initializeDynamicFilter() {
             filter_config_.history_size,
             filter_config_.stability_threshold,
             filter_config_.search_radius);
+        if (debug_enabled_) {
+            RCLCPP_INFO(this->get_logger(), "动态过滤器调试模式: 启用");
+        }
 
         return true;
     }
@@ -154,8 +169,11 @@ localizers::DynamicFilterConfig PointCloudFilterBridge::loadFilterConfig() {
 }
 
 void PointCloudFilterBridge::lidarCallback(const livox_ros_driver2::msg::CustomMsg::SharedPtr msg) {
+    RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 2000, "接收到lidar数据，点数: %u", msg->point_num);
+
     // 检查处理频率限制
     if (!checkProcessingRate()) {
+        RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 5000, "处理频率限制，跳过此帧");
         return;
     }
 
@@ -164,6 +182,8 @@ void PointCloudFilterBridge::lidarCallback(const livox_ros_driver2::msg::CustomM
         RCLCPP_WARN(this->get_logger(), "接收到无效的CustomMsg消息");
         return;
     }
+
+    RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 2000, "消息验证通过，开始处理");
 
     auto start_time = std::chrono::high_resolution_clock::now();
 
@@ -174,15 +194,18 @@ void PointCloudFilterBridge::lidarCallback(const livox_ros_driver2::msg::CustomM
             RCLCPP_WARN(this->get_logger(), "转换后的点云为空");
             return;
         }
+        RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 2000, "PCL转换成功，点数: %zu", input_cloud->size());
 
         // 步骤2: 应用动态过滤器
         double timestamp = getCurrentTimestamp();
+        RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 2000, "开始动态过滤处理...");
         CloudType::Ptr filtered_cloud = dynamic_filter_->filterDynamicObjects(input_cloud, timestamp);
 
         if (!filtered_cloud) {
-            RCLCPP_ERROR(this->get_logger(), "动态过滤处理失败");
+            RCLCPP_ERROR(this->get_logger(), "动态过滤处理失败，返回空指针");
             return;
         }
+        RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 2000, "动态过滤完成，输出点数: %zu", filtered_cloud->size());
 
         // 步骤3: 转换回CustomMsg格式
         auto filtered_msg = pclToCustomMsg(filtered_cloud, msg);
@@ -247,60 +270,35 @@ CloudType::Ptr PointCloudFilterBridge::customMsgToPCL(
 livox_ros_driver2::msg::CustomMsg::SharedPtr PointCloudFilterBridge::pclToCustomMsg(
     const CloudType::Ptr& cloud,
     const livox_ros_driver2::msg::CustomMsg::SharedPtr& original_msg) {
-    
+
     auto custom_msg = std::make_shared<livox_ros_driver2::msg::CustomMsg>();
-    
-    // 保持原始消息的头部信息
+
+    // 继承原始消息头与设备信息
     custom_msg->header = original_msg->header;
     custom_msg->timebase = original_msg->timebase;
     custom_msg->lidar_id = original_msg->lidar_id;
     custom_msg->rsvd = original_msg->rsvd;
-    
-    // 设置点数
-    custom_msg->point_num = cloud->size();
-    custom_msg->points.reserve(cloud->size());
 
-    // 转换每个点
-    // 注意：我们需要从原始消息中找到对应的时间信息
-    // 这里简化处理，假设过滤后的点在原始点中能找到对应关系
-    size_t original_idx = 0;
-    for (size_t i = 0; i < cloud->size() && original_idx < original_msg->points.size(); ++i) {
-        const auto& pcl_point = cloud->points[i];
-        
-        // 寻找最接近的原始点（基于位置匹配）
-        bool found = false;
-        for (size_t j = original_idx; j < original_msg->points.size(); ++j) {
-            const auto& orig_point = original_msg->points[j];
-            
-            // 检查位置是否匹配（允许小的浮点误差）
-            float dx = std::abs(pcl_point.x - orig_point.x);
-            float dy = std::abs(pcl_point.y - orig_point.y);  
-            float dz = std::abs(pcl_point.z - orig_point.z);
-            
-            if (dx < 1e-6 && dy < 1e-6 && dz < 1e-6) {
-                // 找到匹配点，复制原始点的所有信息
-                custom_msg->points.push_back(orig_point);
-                original_idx = j + 1;
-                found = true;
-                break;
-            }
-        }
-        
-        if (!found) {
-            // 如果没找到匹配的原始点，创建新点
-            livox_ros_driver2::msg::CustomPoint new_point;
-            new_point.x = pcl_point.x;
-            new_point.y = pcl_point.y;
-            new_point.z = pcl_point.z;
-            new_point.reflectivity = static_cast<uint8_t>(pcl_point.intensity);
-            new_point.tag = 0;
-            new_point.line = 0;
-            new_point.offset_time = 0;  // 默认时间偏移
-            
-            custom_msg->points.push_back(new_point);
-        }
+    // 直接基于过滤后的点云生成 CustomMsg，避免 O(N^2) 匹配造成卡顿
+    const size_t n = cloud ? cloud->size() : 0;
+    custom_msg->points.reserve(n);
+
+    for (size_t i = 0; i < n; ++i) {
+        const auto& p = cloud->points[i];
+        livox_ros_driver2::msg::CustomPoint out;
+        out.x = p.x;
+        out.y = p.y;
+        out.z = p.z;
+        // intensity 在 customMsgToPCL 中由 reflectivity 赋值，这里复用
+        out.reflectivity = static_cast<uint8_t>(std::max(0.0f, std::min(255.0f, p.intensity)));
+        // 无法可靠恢复 tag/line/offset_time，使用保守默认值
+        out.tag = 0;
+        out.line = 0;
+        out.offset_time = 0;
+        custom_msg->points.push_back(out);
     }
 
+    custom_msg->point_num = static_cast<uint32_t>(custom_msg->points.size());
     return custom_msg;
 }
 
@@ -358,10 +356,9 @@ bool PointCloudFilterBridge::validateCustomMsg(
     }
     
     if (msg->points.size() != msg->point_num) {
-        RCLCPP_WARN(this->get_logger(), 
-            "点数不匹配: point_num=%u, points.size()=%zu", 
+        RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
+            "点数不匹配: point_num=%u, points.size()=%zu (继续处理)",
             msg->point_num, msg->points.size());
-        return false;
     }
     
     return true;

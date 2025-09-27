@@ -1,32 +1,34 @@
-# 点云过滤桥接节点配置文件
-# Point Cloud Filter Bridge Configuration
+# ROS 2 参数文件 (符合 rcl 参数解析规范)
 
-# ============= ROS话题配置 =============
-input_topic: "/livox/lidar"                    # 输入话题：原始livox数据
-output_topic: "/livox/lidar_filtered"          # 输出话题：过滤后数据  
-debug_topic: "/point_cloud_filter/debug_cloud" # 调试话题：PCL格式点云
-stats_topic: "/point_cloud_filter/filter_stats" # 统计话题：过滤统计信息
+point_cloud_filter_bridge:
+  ros__parameters:
+    # ROS话题配置
+    input_topic: "/livox/lidar"                    # 输入话题：原始livox数据
+    output_topic: "/livox/lidar_filtered"          # 输出话题：过滤后数据
+    debug_topic: "/point_cloud_filter/debug_cloud" # 调试话题：PCL格式点云
+    stats_topic: "/point_cloud_filter/filter_stats" # 统计话题：过滤统计信息
 
-# ============= 节点控制参数 =============
-debug_enabled: false          # 是否启用调试模式（发布调试点云）
-publish_stats: true           # 是否发布过滤统计信息
-max_processing_hz: 10.0       # 最大处理频率限制（Hz）
+    # 节点控制参数
+    debug_enabled: true          # 是否启用调试模式
+    publish_stats: true           # 是否发布过滤统计信息
+    max_processing_hz: 20.0       # 最大处理频率限制
 
-# ============= 动态过滤器参数 =============
-dynamic_filter:
-  # 时间一致性参数
-  motion_threshold: 0.05       # 运动阈值(m) - 点位移超过此值被认为是动态的
-  history_size: 3              # 历史帧数 - 用于时间一致性分析
-  stability_threshold: 0.8     # 稳定性阈值 [0,1] - 高于此值的点被认为是静态的
-  max_time_diff: 1.0          # 最大时间差(s) - 超过此时间的历史数据将被丢弃
+    # 动态过滤器参数 - 调整为更保守的设置避免阻塞
+    dynamic_filter:
+      debug_enabled: false        # 启用动态过滤器详细调试日志
+      # 时间一致性参数
+      motion_threshold: 0.1        # 运动阈值 - 提高避免过度敏感
+      history_size: 1              # 历史帧数 - 减少到1避免时间复杂度
+      stability_threshold: 0.5     # 稳定性阈值 - 降低要求
+      max_time_diff: 2.0           # 最大时间差 - 增加容忍度
 
-  # 几何特征参数  
-  search_radius: 0.2           # 邻域搜索半径(m) - 用于计算局部几何特征
-  min_neighbors: 8             # 最小邻居点数 - 低于此数量的点可能被认为是噪声
-  normal_consistency_thresh: 0.8  # 法向量一致性阈值 [0,1] - 用于表面连续性检查
-  density_ratio_thresh: 0.5    # 密度比值阈值 [0,1] - 用于检测密度变化
+      # 几何特征参数
+      search_radius: 1.0           # 邻域搜索半径 - 增大搜索范围
+      min_neighbors: 3             # 最小邻居点数 - 大幅减少避免搜索阻塞
+      normal_consistency_thresh: 0.3  # 法向量一致性阈值 - 降低要求
+      density_ratio_thresh: 0.3    # 密度比值阈值 - 降低要求
 
-  # 性能优化参数
-  downsample_ratio: 2          # 降采样比例 - 用于减少计算量
-  max_points_per_frame: 50000  # 每帧最大点数 - 超过此数量将进行自适应降采样
-  voxel_size_base: 0.01       # 基础体素大小(m) - 用于体素滤波
+      # 性能优化参数
+      downsample_ratio: 8          # 降采样比例 - 增大减少处理量
+      max_points_per_frame: 10000  # 每帧最大点数 - 大幅减少处理量
+      voxel_size_base: 0.2         # 基础体素大小 - 增大减少细节

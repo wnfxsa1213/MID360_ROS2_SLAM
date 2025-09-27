@@ -1360,15 +1360,32 @@ case "${CMD}" in
 
         echo ""
 
-        # 如果提供了参数，使用指定的文件
+        # 如果提供了参数，解析为绝对路径/相对路径/相对saved_maps或仅文件名
         if [ -n "${2-}" ]; then
-            selected_pcd="${2}"
-            # 如果不是完整路径，在maps目录中查找
-            if [ ! -f "$selected_pcd" ]; then
-                selected_pcd="$MAPS_DIR/$2"
-                if [ ! -f "$selected_pcd" ]; then
-                    echo -e "${RED}❌ 指定的PCD文件不存在: $2${NC}"
-                    exit 1
+            user_arg="${2}"
+            # 1) 绝对或当前工作目录相对路径
+            if [ -f "$user_arg" ]; then
+                selected_pcd="$user_arg"
+            else
+                # 2) 去掉可能的 saved_maps/ 前缀后，按 saved_maps 下的相对子路径查找
+                rel_arg="${user_arg#saved_maps/}"
+                if [ -f "$MAPS_DIR/$rel_arg" ]; then
+                    selected_pcd="$MAPS_DIR/$rel_arg"
+                else
+                    # 3) 在 saved_maps 递归按文件名搜索（如仅给了 basename）
+                    search_name="$(basename "$user_arg")"
+                    found_match=$(find "$MAPS_DIR" -type f -name "$search_name" -print -quit 2>/dev/null)
+                    if [ -n "$found_match" ]; then
+                        selected_pcd="$found_match"
+                    else
+                        echo -e "${RED}❌ 指定的PCD文件不存在: $2${NC}"
+                        echo -e "${YELLOW}ℹ 提示: 可传入以下任一形式${NC}"
+                        echo "  • 绝对路径: /full/path/to/map.pcd"
+                        echo "  • 相对当前目录: saved_maps/subdir/map.pcd"
+                        echo "  • 相对 saved_maps 的子路径: subdir/map.pcd"
+                        echo "  • 仅文件名(若唯一): map.pcd"
+                        exit 1
+                    fi
                 fi
             fi
         else
@@ -1387,7 +1404,8 @@ case "${CMD}" in
         output_file="$MAPS_DIR/${pcd_basename}_gridmap"
 
         # 执行转换
-        if python3 "$SCRIPT_DIR/pcd_to_gridmap.py" "$selected_pcd" -o "$output_file" --resolution 0.05; then
+        # 根据车辆外宽55cm建议的安全膨胀半径：约0.35m（半宽0.275m+冗余）
+        if python3 "$SCRIPT_DIR/pcd_to_gridmap.py" "$selected_pcd" -o "$output_file" --resolution 0.05 --robot-height 0.8 --inflate-radius 0.35; then
             echo ""
             echo -e "${GREEN}✅ 转换完成!${NC}"
             echo -e "${CYAN}📁 输出文件:${NC}"

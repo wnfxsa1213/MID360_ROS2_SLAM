@@ -32,22 +32,29 @@ python3 tools/view_gridmap.py saved_maps/mid360_map_20250918_151632_gridmap.yaml
 ### 自定义转换参数
 
 ```bash
-# 使用更高精度的分辨率
+# 使用更高精度 + 车辆参数（底盘高0.3m，整车高0.8m，外宽0.55m）
 python3 tools/pcd_to_gridmap.py saved_maps/input.pcd \
     -o saved_maps/high_res_map \
-    --resolution 0.02 \
-    --height-min -0.3 \
-    --height-max 1.5 \
-    --obstacle-thresh 8 \
-    --free-thresh 2
+    --resolution 0.03 \
+    --ground-min -0.3 \
+    --ground-max 0.3 \
+    --ceiling-min 1.8 \
+    --ceiling-max 3.0 \
+    --robot-height 0.8 \
+    --obstacle-thresh 6 \
+    --vertical-thresh 0.8 \
+    --inflate-radius 0.35
 ```
 
 ### 参数说明
 
 - `--resolution`: 栅格分辨率（米/像素），默认0.05。更小的值提供更高精度但文件更大
-- `--height-min/max`: 有效高度范围（米），用于过滤点云
-- `--obstacle-thresh`: 障碍物点云密度阈值，高于此值的栅格标记为障碍物
-- `--free-thresh`: 自由空间点云密度阈值，低于此值但大于0的栅格标记为自由空间
+- `--ground-min/max`: 地面附近高度范围，用于可通行性判断
+- `--ceiling-min/max`: 天花板高度范围；室外转换可保持默认或调高上限
+- `--robot-height`: 车辆高度（米），用于垂直结构与通行性推断
+- `--obstacle-thresh`: 障碍物点云密度阈值（机器人层）
+- `--vertical-thresh`: 垂直连续性阈值，用于墙柱判定
+- `--inflate-radius`: 障碍物膨胀半径（米），建议≈半车宽0.275m + 0.05~0.10m冗余；示例用0.35
 
 ## 输出文件说明
 
@@ -119,9 +126,8 @@ ros2 run map_server map_server --ros-args \
 - 检查SLAM数据质量
 
 **如果地图稀疏**:
-- 减小`--obstacle-thresh`参数
-- 增大`--free-thresh`参数
-- 使用更精细的分辨率
+- 减小`--obstacle-thresh`
+- 使用更精细的分辨率（0.03–0.05）
 
 **如果文件太大**:
 - 增大分辨率值（如0.1而不是0.05）
@@ -136,8 +142,11 @@ A: 尝试减小`--obstacle-thresh`和`--free-thresh`参数值，或使用更精�
 ### Q: 地图文件很大怎么办？
 A: 增大分辨率参数（如0.1），或者在保存PCD时减少点云密度。
 
-### Q: 如何处理多层建筑？
-A: 调整`--height-min`和`--height-max`参数，分别为每层生成独立的栅格地图。
+### Q: 如何处理室外→室内过渡？
+A: 保持`--robot-height`准确，室外的高空点（树冠/雨棚）不会标为障碍；仅当机器人高度层出现密集点时才判为障碍。必要时可增大`--ceiling-min`，或启用`--disable-panoramic`做纯2D密度图。
+
+### Q: 多层建筑怎么做？
+A: 分别针对每层设置`--ground-min/max`与`--ceiling-min/max`并各自生成一张地图。
 
 ### Q: 转换的地图在RViz中显示异常？
 A: 检查YAML文件中的`negate`参数，确保原点坐标正确。

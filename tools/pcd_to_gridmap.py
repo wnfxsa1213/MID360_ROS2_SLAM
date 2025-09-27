@@ -10,16 +10,15 @@ import open3d as o3d
 import cv2
 import yaml
 import argparse
-import os
 from pathlib import Path
-from scipy import ndimage
 from collections import defaultdict
 
 class PCDToGridMap:
     def __init__(self, resolution=0.05, ground_height=(-0.3, 0.3),
-                 ceiling_height=(1.8, 3.0), robot_height=0.5,
+                 ceiling_height=(1.8, 3.0), robot_height=0.8,
                  obstacle_threshold=3, vertical_continuity_threshold=0.8,
-                 panoramic_analysis=True):
+                 panoramic_analysis=True,
+                 inflate_radius=0.0):
         """
         初始化PCD到栅格地图转换器（增强版本：利用MID360全景扫描）
 
@@ -39,6 +38,7 @@ class PCDToGridMap:
         self.obstacle_threshold = obstacle_threshold
         self.vertical_continuity_threshold = vertical_continuity_threshold
         self.panoramic_analysis = panoramic_analysis
+        self.inflate_radius = inflate_radius
 
         # 多层高度分析参数
         self.height_layers = {
@@ -140,9 +140,9 @@ class PCDToGridMap:
         min_y -= buffer
         max_y += buffer
 
-        # 计算栅格尺寸
-        grid_width = int((max_x - min_x) / self.resolution)
-        grid_height = int((max_y - min_y) / self.resolution)
+        # 计算栅格尺寸（向上取整，避免裁剪边界）
+        grid_width = int(np.ceil((max_x - min_x) / self.resolution))
+        grid_height = int(np.ceil((max_y - min_y) / self.resolution))
 
         print(f"地图边界: X[{min_x:.2f}, {max_x:.2f}], Y[{min_y:.2f}, {max_y:.2f}]")
         print(f"栅格尺寸: {grid_width} x {grid_height}")
@@ -175,21 +175,24 @@ class PCDToGridMap:
         # 转换到栅格坐标
         grid_x, grid_y, grid_width, grid_height, origin_x, origin_y = self.points_to_grid(navigable_points)
 
-        # 创建多层密度地图
+        # 创建多层密度地图（统一使用导航网格的原点与尺寸，避免坐标错位）
         density_maps = {}
         for layer_name, points_layer in layer_points.items():
             if len(points_layer) == 0:
                 continue
 
-            layer_grid_x, layer_grid_y, _, _, _, _ = self.points_to_grid(points_layer)
+            # 使用与导航网格相同的原点进行索引换算
+            layer_grid_x = ((points_layer[:, 0] - origin_x) / self.resolution).astype(int)
+            layer_grid_y = ((points_layer[:, 1] - origin_y) / self.resolution).astype(int)
             density_map = np.zeros((grid_height, grid_width), dtype=np.int32)
 
-            # 统计每个栅格的点云数量
+            # 统计每个栅格的点云数量（向量化累加）
             valid_indices = (layer_grid_x >= 0) & (layer_grid_x < grid_width) & \
                            (layer_grid_y >= 0) & (layer_grid_y < grid_height)
-            for i in np.where(valid_indices)[0]:
-                x, y = layer_grid_x[i], layer_grid_y[i]
-                density_map[y, x] += 1
+            lx = layer_grid_x[valid_indices]
+            ly = layer_grid_y[valid_indices]
+            if lx.size > 0:
+                np.add.at(density_map, (ly, lx), 1)
 
             density_maps[layer_name] = density_map
 
@@ -248,13 +251,23 @@ class PCDToGridMap:
                 layer_density = density_maps[layer_name]
                 overhead_obstacle_mask |= (layer_density >= self.obstacle_threshold)
 
-        # 在机器人高度层没有障碍物但上方有障碍物的区域，可能是低矮障碍物
-        potential_low_obstacle = overhead_obstacle_mask & (occupancy_grid == -1)
-        occupancy_grid[potential_low_obstacle] = 50  # 低信心度障碍物
+        # 在机器人高度层没有障碍物但上方有障碍物的区域，保留为未知（避免误判遮挡物）
+        # 可选：如果需要，可在此处标注低置信障碍（值50），但默认保持未知
+        # potential_low_obstacle = overhead_obstacle_mask & (occupancy_grid == -1)
+        # occupancy_grid[potential_low_obstacle] = 50
 
         # 增强自由空间推理：利用全景扫描特性
         if self.panoramic_analysis:
             occupancy_grid = self.enhance_free_space_inference(occupancy_grid, density_maps)
+
+        # 可选：根据车辆尺寸对障碍物进行膨胀，提升导航安全裕度
+        if self.inflate_radius and self.inflate_radius > 0.0:
+            pix_radius = max(1, int(np.round(self.inflate_radius / self.resolution)))
+            kernel_size = 2 * pix_radius + 1
+            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
+            obstacle_binary = (occupancy_grid == 100).astype(np.uint8)
+            inflated = cv2.dilate(obstacle_binary, kernel, iterations=1)
+            occupancy_grid[inflated == 1] = 100
 
         return occupancy_grid
 
@@ -321,15 +334,18 @@ class PCDToGridMap:
             return False
 
         # 转换为PGM格式的图像数据
-        # PGM格式: 0=黑色(障碍物), 255=白色(自由空间), 127=灰色(未知), 200=浅灰色(低信心度障碍物)
+        # PGM格式: 0=黑色(障碍物), 255=白色(自由空间), 127=灰色(未知)
         pgm_data = np.full_like(occupancy_grid, 127, dtype=np.uint8)  # 默认灰色(未知)
         pgm_data[occupancy_grid == 0] = 255     # 自由空间 -> 白色
-        pgm_data[occupancy_grid == 50] = 200    # 低信心度障碍物 -> 浅灰色
+        # 将低置信障碍（50）视为未知，避免与trinary阈值冲突
         pgm_data[occupancy_grid == 100] = 0     # 障碍物 -> 黑色
+
+        # 为兼容ROS map_server 的原点定义，垂直翻转图像（使行0对应地图底部）
+        pgm_to_save = np.flipud(pgm_data)
 
         # 保存PGM文件
         pgm_file = output_file.with_suffix('.pgm')
-        success = cv2.imwrite(str(pgm_file), pgm_data)
+        success = cv2.imwrite(str(pgm_file), pgm_to_save)
 
         if success:
             print(f"栅格地图已保存为: {pgm_file}")
@@ -418,8 +434,10 @@ def main():
                        help='天花板最小高度(米，默认1.8)')
     parser.add_argument('--ceiling-max', type=float, default=3.0,
                        help='天花板最大高度(米，默认3.0)')
-    parser.add_argument('--robot-height', type=float, default=0.5,
-                       help='机器人高度(米，默认0.5)')
+    parser.add_argument('--robot-height', type=float, default=0.8,
+                       help='机器人高度(米)，用于垂直结构与通行性推断（默认0.8）')
+    parser.add_argument('--inflate-radius', type=float, default=0.0,
+                       help='障碍物膨胀半径(米)，根据底盘/安全裕度设置（默认0.0=不膨胀）')
     parser.add_argument('--obstacle-thresh', type=int, default=3,
                        help='障碍物点云密度阈值(默认3)')
     parser.add_argument('--vertical-thresh', type=float, default=0.8,
@@ -452,7 +470,8 @@ def main():
         robot_height=args.robot_height,
         obstacle_threshold=args.obstacle_thresh,
         vertical_continuity_threshold=args.vertical_thresh,
-        panoramic_analysis=not args.disable_panoramic
+        panoramic_analysis=not args.disable_panoramic,
+        inflate_radius=args.inflate_radius
     )
 
     # 执行转换

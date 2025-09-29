@@ -62,7 +62,7 @@ show_help() {
     echo -e "${YELLOW}可用命令:${NC}"
     echo -e "  ${CYAN}start${NC}     - 启动SLAM系统；支持子命令:"
     echo -e "                 start realtime  # 应用实机预设并启动"
-    echo -e "                 start replay --bag <dir> [--rate 1.0] [--loop]  # 应用回放预设并启动"
+    echo -e "                 start replay --bag <dir> [--rate 1.0] [--loop] [--no-dynamic-filter]  # 应用回放预设并启动；可临时关闭动态过滤"
     echo -e "  ${CYAN}start-basic${NC} - 仅启动基础SLAM (fastlio2)"
     echo -e "  ${CYAN}stop${NC}      - 停止SLAM系统"
     echo -e "  ${CYAN}status${NC}    - 检查系统状态"
@@ -441,6 +441,7 @@ case "${CMD}" in
             TOPICS=""
             REMAPS=()
             START_OFFSET=""
+            NO_DYN_FILTER="false"
             while [[ $# -gt 0 ]]; do
                 case "$1" in
                     --bag)
@@ -455,6 +456,8 @@ case "${CMD}" in
                         REMAPS+=("${2-}"); shift 2;;
                     --start-offset)
                         START_OFFSET="${2-}"; shift 2;;
+                    --no-dynamic-filter|--disable-dynamic-filter)
+                        NO_DYN_FILTER="true"; shift;;
                     *)
                         echo -e "${YELLOW}忽略未知参数:${NC} $1"; shift;;
                 esac
@@ -467,6 +470,56 @@ case "${CMD}" in
             AUTO_PLAY="true"
             if [[ -n "$TOPICS" || ${#REMAPS[@]} -gt 0 ]]; then
                 AUTO_PLAY="false"
+            fi
+
+            # 可选：临时禁用 Localizer 动态过滤，并将 PGO 改为吃 /slam/body_cloud
+            # 实现方式：在启动前备份并修改配置文件，退出时恢复
+            if [[ "$NO_DYN_FILTER" == "true" ]]; then
+                echo -e "${YELLOW}临时禁用 Localizer 动态过滤，并将 PGO 订阅改为 /slam/body_cloud${NC}"
+                py_edit_cfg='import sys,yaml,shutil
+from pathlib import Path
+root=Path(".")
+src_loc=root/"ws_livox/src/localizer/config/localizer.yaml"
+inst_loc=root/"install/localizer/share/localizer/config/localizer.yaml"
+src_pgo=root/"ws_livox/src/pgo/config/pgo.yaml"
+inst_pgo=root/"install/pgo/share/pgo/config/pgo.yaml"
+bak1=Path("/tmp/localizer.yaml.bak"); bak2=Path("/tmp/localizer.install.yaml.bak")
+bak3=Path("/tmp/pgo.yaml.bak"); bak4=Path("/tmp/pgo.install.yaml.bak")
+def patch_loc(p:Path):
+    if not p.exists(): return
+    data=yaml.safe_load(p.read_text())
+    d=data.get("dynamic_filter",{})
+    d["enable"]=False
+    data["dynamic_filter"]=d
+    p.write_text(yaml.safe_dump(data,allow_unicode=True,sort_keys=False))
+def patch_pgo(p:Path):
+    if not p.exists(): return
+    data=yaml.safe_load(p.read_text())
+    data["cloud_topic"]="/slam/body_cloud"
+    p.write_text(yaml.safe_dump(data,allow_unicode=True,sort_keys=False))
+shutil.copy2(src_loc,bak1) if src_loc.exists() else None
+shutil.copy2(inst_loc,bak2) if inst_loc.exists() else None
+shutil.copy2(src_pgo,bak3) if src_pgo.exists() else None
+shutil.copy2(inst_pgo,bak4) if inst_pgo.exists() else None
+patch_loc(src_loc); patch_loc(inst_loc)
+patch_pgo(src_pgo); patch_pgo(inst_pgo)
+print("OK")
+'
+                python3 -c "$py_edit_cfg" >/dev/null 2>&1 || true
+                # 在清理阶段恢复备份
+                restore_cfg() {
+                    for pair in \
+                        "/tmp/localizer.yaml.bak:ws_livox/src/localizer/config/localizer.yaml" \
+                        "/tmp/localizer.install.yaml.bak:install/localizer/share/localizer/config/localizer.yaml" \
+                        "/tmp/pgo.yaml.bak:ws_livox/src/pgo/config/pgo.yaml" \
+                        "/tmp/pgo.install.yaml.bak:install/pgo/share/pgo/config/pgo.yaml"; do
+                        IFS=":" read -r bak dst <<< "$pair"
+                        if [[ -f "$bak" ]]; then
+                            cp -f "$bak" "$dst" 2>/dev/null || true
+                            rm -f "$bak" 2>/dev/null || true
+                        fi
+                    done
+                }
             fi
             if [[ -n "$BAG" && "$AUTO_PLAY" == "true" ]]; then
                 cmd+=(auto_play_bag:=true bag_path:="$BAG" bag_rate:="$RATE")
@@ -496,7 +549,7 @@ case "${CMD}" in
                 fi
             }
             # 仅在中断/终止信号时清理，避免脚本自然返回时提前杀进程
-            trap cleanup INT TERM
+            trap 'cleanup; restore_cfg 2>/dev/null || true' INT TERM
 
             if [[ -n "$BAG" && "$AUTO_PLAY" == "false" ]]; then
                 # 构造 ros2 bag play 命令，附带 topics 与 remaps
@@ -532,7 +585,7 @@ case "${CMD}" in
             echo -e "${YELLOW}按 Ctrl+C 停止回放并关闭SLAM${NC}"
             # 等待协同系统launch退出（正常或被中断），随后执行清理
             wait "$SLAM_SYSTEM_PID" 2>/dev/null || true
-            cleanup
+            cleanup; restore_cfg 2>/dev/null || true
         else
             echo -e "${GREEN}启动完整SLAM系统 (所有可用组件)...${NC}"
             start_cooperative_slam_system
@@ -1353,25 +1406,6 @@ case "${CMD}" in
             exit 1
         fi
 
-        # 显示可用的PCD文件
-        echo -e "${CYAN}📋 可用的PCD地图文件:${NC}"
-        pcd_files=()
-        while IFS= read -r -d '' file; do
-            pcd_files+=("$file")
-            basename_file=$(basename "$file")
-            size=$(ls -lh "$file" | awk '{print $5}')
-            mtime=$(ls -l "$file" | awk '{print $6, $7, $8}')
-            echo "  $basename_file (大小: $size, 修改时间: $mtime)"
-        done < <(find "$MAPS_DIR" -name "*.pcd" -print0 2>/dev/null | sort -z)
-
-        if [ ${#pcd_files[@]} -eq 0 ]; then
-            echo -e "${RED}❌ 未找到PCD地图文件${NC}"
-            echo -e "${YELLOW}💡 提示: 请先使用 'save' 命令保存SLAM地图${NC}"
-            exit 1
-        fi
-
-        echo ""
-
         # 如果提供了参数，解析为绝对路径/相对路径/相对saved_maps或仅文件名
         if [ -n "${2-}" ]; then
             user_arg="${2}"
@@ -1384,9 +1418,14 @@ case "${CMD}" in
                 if [ -f "$MAPS_DIR/$rel_arg" ]; then
                     selected_pcd="$MAPS_DIR/$rel_arg"
                 else
-                    # 3) 在 saved_maps 递归按文件名搜索（如仅给了 basename）
+                    # 3) 使用索引快速查找（如仅给了 basename）
                     search_name="$(basename "$user_arg")"
-                    found_match=$(find "$MAPS_DIR" -type f -name "$search_name" -print -quit 2>/dev/null)
+                    INDEX_TOOL="$SCRIPT_DIR/pcd_index.py"
+                    if [ -f "$INDEX_TOOL" ]; then
+                        found_match=$(python3 "$INDEX_TOOL" --root "$MAPS_DIR" --index "$MAPS_DIR/.pcd_index.json" --ensure --find "$search_name" 2>/dev/null || true)
+                    else
+                        found_match=""
+                    fi
                     if [ -n "$found_match" ]; then
                         selected_pcd="$found_match"
                     else
@@ -1401,8 +1440,27 @@ case "${CMD}" in
                 fi
             fi
         else
+            # 未提供参数时，再展示列表（避免每次都全量遍历）
+            echo -e "${CYAN}📋 可用的PCD地图文件(示例):${NC}"
+            INDEX_TOOL="$SCRIPT_DIR/pcd_index.py"
+            if [ -f "$INDEX_TOOL" ]; then
+                python3 "$INDEX_TOOL" --root "$MAPS_DIR" --ensure >/dev/null 2>&1 || true
+                latest_pcd=$(python3 "$INDEX_TOOL" --root "$MAPS_DIR" --latest 2>/dev/null || true)
+                if [ -n "$latest_pcd" ]; then
+                    basename_file=$(basename "$latest_pcd")
+                    size=$(ls -lh "$latest_pcd" | awk '{print $5}')
+                    mtime=$(ls -l "$latest_pcd" | awk '{print $6, $7, $8}')
+                    echo "  最新: $basename_file (大小: $size, 修改时间: $mtime)"
+                fi
+            else
+                echo "  (索引工具缺失，跳过展示)"
+            fi
             # 使用最新的PCD文件
-            selected_pcd=$(find "$MAPS_DIR" -name "*.pcd" -printf '%T@ %p\n' 2>/dev/null | sort -n | tail -1 | cut -d' ' -f2-)
+            if [ -f "$INDEX_TOOL" ]; then
+                selected_pcd=$(python3 "$INDEX_TOOL" --root "$MAPS_DIR" --latest 2>/dev/null || true)
+            else
+                selected_pcd=$(find "$MAPS_DIR" -name "*.pcd" -printf '%T@ %p\n' 2>/dev/null | sort -n | tail -1 | cut -d' ' -f2-)
+            fi
             if [ -z "$selected_pcd" ]; then
                 echo -e "${RED}❌ 无法确定最新的PCD文件${NC}"
                 exit 1
@@ -1440,6 +1498,16 @@ case "${CMD}" in
             echo "  ros2 run map_server map_server --ros-args -p yaml_filename:=$output_file.yaml"
         else
             echo -e "${RED}❌ 转换失败${NC}"
+            exit 1
+        fi
+        ;;
+
+    "gridmap-gui")
+        echo -e "${YELLOW}🖼️  启动栅格地图可视化转换器 (PyQt5)${NC}"
+        if [ -f "$SCRIPT_DIR/gridmap_gui.py" ]; then
+            python3 "$SCRIPT_DIR/gridmap_gui.py"
+        else
+            echo -e "${RED}❌ GUI脚本不存在: $SCRIPT_DIR/gridmap_gui.py${NC}"
             exit 1
         fi
         ;;

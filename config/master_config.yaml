@@ -78,14 +78,14 @@ livox_driver:
   cmdline_input_bd_code: livox0000000001
   lidar_config:
     pcl_data_type: 1        # 点格式｜↑ 通道多/带宽↑；↓ 轻量
-    pattern_mode: 0         # 扫描模式｜↑(1) 细节↑/带宽↑；↓(0) 速度↑/细节↓
+    pattern_mode: 1         # 扫描模式｜↑(1) 细节↑/带宽↑；↓(0) 速度↑/细节↓
 fastlio2:
   print_time_cost: true     # 打印耗时｜↑ 便于调试；↓ 安静
-  lidar_filter_num: 2       # 点云滤波次数｜↑ 速度↑/细节↓；↓ 细节↑/耗时↑
-  lidar_min_range: 0.5      # 最近距离m｜↑ 近噪↓/近结构↓；↓ 近细节↑/噪声↑
-  lidar_max_range: 25.0     # 最远距离m｜↑ 远距鲁棒↑/耗时↑；↓ 速度↑/远距↓
-  scan_resolution: 0.1     # 扫描分辨率m｜↑ 更粗更快；↓ 更细更慢
-  map_resolution: 0.1      # 地图分辨率m｜↑ 更粗更快；↓ 更细更慢
+  lidar_filter_num: 1       # 点云滤波次数｜↑ 速度↑/细节↓；↓ 细节↑/耗时↑（回放易稀疏→降为1保点）
+  lidar_min_range: 0.3      # 最近距离m｜↑ 近噪↓/近结构↓；↓ 近细节↑/噪声↑（尾段易空→适度放宽）
+  lidar_max_range: 30.0     # 最远距离m｜↑ 远距鲁棒↑/耗时↑；↓ 速度↑/远距↓（扩大以提升可用邻域）
+  scan_resolution: 0.2     # 扫描分辨率m｜↑ 更粗更快；↓ 更细更慢（适度更细保留更多特征）
+  map_resolution: 0.25      # 地图分辨率m｜↑ 更粗更快；↓ 更细更慢（略微更密提高邻域命中）
   cube_len: 100             # 局部地图范围m｜↑ 内存↑/稳定↑；↓ 轻量/退化风险↑
   det_range: 30             # 匹配检测范围m｜↑ 收敛稳/耗时↑；↓ 速度↑/易欠收敛
   move_thresh: 0.8          # 关键帧移动阈值m｜↑ 更稀疏/漂移风险↑；↓ 更密/耗时↑
@@ -95,9 +95,9 @@ fastlio2:
     acc_bias: 0.0001        # 加计偏置噪声｜↑ 偏置不自信；↓ 偏置更可信
     gyro_bias: 5.0e-05      # 陀螺偏置噪声｜同上
   algorithm:
-    imu_init_num: 200       # IMU初始化样本｜↑ 启动更稳/更慢；↓ 更快/不稳
-    near_search_num: 10     # 最近邻数量｜↑ 稳定↑/耗时↑；↓ 速度↑/欠收敛
-    ieskf_max_iter: 5       # 迭代次数｜↑ 精度↑/耗时↑；↓ 速度↑
+    imu_init_num: 500       # IMU初始化样本｜↑ 启动更稳/更慢；↓ 更快/不稳
+    near_search_num: 8     # 最近邻数量｜↑ 稳定↑/耗时↑；↓ 速度↑/欠收敛（保持：配合更密地图更稳）
+    ieskf_max_iter: 6       # 迭代次数｜↑ 精度↑/耗时↑；↓ 速度↑（轻微提高收敛余量）
     gravity_align: true     # 重力对齐
     esti_il: false           # 估计雷达-IMU外参
   point_cloud:
@@ -106,8 +106,8 @@ fastlio2:
     point_filter_num: 4     # 点云过滤级数｜↑ 速度↑/细节↓；↓ 细节↑/耗时↑
     converge_thresh: 0.0001 # 收敛阈值｜↑ 易早停/速度↑；↓ 更严格/精度↑
   buffer_management:
-    max_imu_buffer_size: 4000   # IMU缓冲｜↑ 抗堵塞/掩盖问题；↓ 及时暴露问题
-    max_lidar_buffer_size: 50   # LiDAR缓冲｜↑ 抗抖动/内存↑；↓ 敏捷/丢帧风险↑
+    max_imu_buffer_size: 8000   # IMU缓冲｜↑ 抗堵塞/掩盖问题；↓ 及时暴露问题（尾段乱序更稳）
+    max_lidar_buffer_size: 100   # LiDAR缓冲｜↑ 抗抖动/内存↑；↓ 敏捷/丢帧风险↑
     enable_buffer_monitoring: true # 缓冲监控
   lidar_topic: /livox/lidar
   imu_topic: /livox/imu

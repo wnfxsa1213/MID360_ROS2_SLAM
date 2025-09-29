@@ -91,6 +91,135 @@ class PCDToGridMap:
         return filtered
 
     @staticmethod
+    def apply_yaw(points: np.ndarray, yaw_deg: float) -> np.ndarray:
+        """绕Z轴旋转点云 yaw_deg（度）"""
+        if yaw_deg is None:
+            return points
+        yaw = np.deg2rad(float(yaw_deg))
+        c, s = np.cos(yaw), np.sin(yaw)
+        R = np.array([[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]], dtype=np.float64)
+        return points @ R.T
+
+    @staticmethod
+    def estimate_yaw_pca(points_xy: np.ndarray) -> float:
+        """基于XY PCA估计主方向，与x轴对齐所需的旋转角度（度）"""
+        if points_xy.shape[0] < 10:
+            return 0.0
+        # 去均值
+        mu = np.mean(points_xy, axis=0)
+        X = points_xy - mu
+        C = np.cov(X.T)
+        eigvals, eigvecs = np.linalg.eigh(C)
+        v = eigvecs[:, np.argmax(eigvals)]  # 主方向
+        angle = np.arctan2(v[1], v[0])  # 向x轴的夹角
+        return -np.rad2deg(angle)  # 需要旋转的角度（度）
+
+    @staticmethod
+    def _bresenham_line(x0, y0, x1, y1):
+        """整数栅格的Bresenham直线生成器"""
+        x0 = int(x0); y0 = int(y0); x1 = int(x1); y1 = int(y1)
+        dx = abs(x1 - x0)
+        dy = -abs(y1 - y0)
+        sx = 1 if x0 < x1 else -1
+        sy = 1 if y0 < y1 else -1
+        err = dx + dy
+        x, y = x0, y0
+        while True:
+            yield x, y
+            if x == x1 and y == y1:
+                break
+            e2 = 2 * err
+            if e2 >= dy:
+                err += dy
+                x += sx
+            if e2 <= dx:
+                err += dx
+                y += sy
+
+    def ray_carve_free(self, occupancy_grid: np.ndarray, origin_x: float, origin_y: float,
+                        poses_xy: np.ndarray, max_range: float = 30.0,
+                        angle_step_deg: float = 2.0, pose_stride: int = 10):
+        """从位姿发射射线，将命中前的未知/自由格强制设为自由，遇障碍即停止"""
+        if poses_xy is None or poses_xy.shape[0] == 0:
+            return occupancy_grid
+        h, w = occupancy_grid.shape
+        step_pix = 1
+        res = self.resolution
+        max_pix = int(max_range / res) if max_range > 0 else max(h, w)
+        angles = np.deg2rad(np.arange(0.0, 360.0, max(0.1, angle_step_deg)))
+        for i in range(0, poses_xy.shape[0], max(1, pose_stride)):
+            px = (poses_xy[i, 0] - origin_x) / res
+            py = (poses_xy[i, 1] - origin_y) / res
+            if not (0 <= px < w and 0 <= py < h):
+                continue
+            for ang in angles:
+                dx = np.cos(ang)
+                dy = np.sin(ang)
+                # 目标点
+                tx = int(px + dx * max_pix)
+                ty = int(py + dy * max_pix)
+                for x, y in self._bresenham_line(px, py, tx, ty):
+                    if not (0 <= x < w and 0 <= y < h):
+                        break
+                    if occupancy_grid[y, x] == 100:
+                        break
+                    # 清理未知/自由为自由
+                    occupancy_grid[y, x] = 0
+        return occupancy_grid
+
+    def ray_carve_by_returns(self, occupancy_grid: np.ndarray, poses_xy: np.ndarray,
+                              max_range: float, angle_step_deg: float,
+                              pose_stride: int) -> np.ndarray:
+        """按观测回波进行雕刻：以有观测的格作为目标端点，沿线清理"""
+        if poses_xy is None or poses_xy.shape[0] == 0:
+            return occupancy_grid
+        if not hasattr(self, '_last_density_maps') or not hasattr(self, '_last_grid_meta'):
+            return occupancy_grid
+        dm = self._last_density_maps
+        meta = self._last_grid_meta
+        h, w = occupancy_grid.shape
+        res = self.resolution
+        ox, oy = meta['origin_x'], meta['origin_y']
+
+        targets = np.zeros((h, w), dtype=np.uint8)
+        if 'robot' in dm:
+            targets |= (dm['robot'] > 0).astype(np.uint8)
+        if 'ground' in dm:
+            targets |= (dm['ground'] > 0).astype(np.uint8)
+        ty, tx = np.where(targets > 0)
+        if ty.size == 0:
+            return occupancy_grid
+        tgt_coords = np.stack([tx, ty], axis=1)
+
+        max_pix = int(max_range / res) if max_range > 0 else max(h, w)
+        bin_deg = max(0.1, angle_step_deg)
+        for i in range(0, poses_xy.shape[0], max(1, pose_stride)):
+            px = (poses_xy[i, 0] - ox) / res
+            py = (poses_xy[i, 1] - oy) / res
+            if not (0 <= px < w and 0 <= py < h):
+                continue
+            used_bins = set()
+            dx = tgt_coords[:, 0] - px
+            dy = tgt_coords[:, 1] - py
+            dist2 = dx*dx + dy*dy
+            order = np.argsort(dist2)
+            limit = min(len(order), int(360.0 / bin_deg) + 4)
+            for idx in order[:limit]:
+                tx1, ty1 = int(tgt_coords[idx, 0]), int(tgt_coords[idx, 1])
+                ang = np.rad2deg(np.arctan2(ty1 - py, tx1 - px)) % 360.0
+                b = int(ang // bin_deg)
+                if b in used_bins:
+                    continue
+                used_bins.add(b)
+                for x, y in self._bresenham_line(px, py, tx1, ty1):
+                    if not (0 <= x < w and 0 <= y < h):
+                        break
+                    if occupancy_grid[y, x] == 100:
+                        break
+                    occupancy_grid[y, x] = 0
+        return occupancy_grid
+
+    @staticmethod
     def _quat_to_rot(qw, qx, qy, qz):
         """四元数转旋转矩阵 (w, x, y, z)"""
         norm = np.sqrt(qw*qw + qx*qx + qy*qy + qz*qz)
@@ -195,6 +324,22 @@ class PCDToGridMap:
             print(f"  {layer_name}: {stats['count']} 点 ({stats['percentage']:.1f}%) [{stats['height_range'][0]:.1f}m ~ {stats['height_range'][1]:.1f}m]")
 
         return layer_points, layer_stats
+
+    @staticmethod
+    def _skeletonize_binary(binary_img: np.ndarray) -> np.ndarray:
+        """形态学骨架提取（binary为0/1）"""
+        img = (binary_img.copy() * 255).astype(np.uint8)
+        skel = np.zeros_like(img)
+        element = cv2.getStructuringElement(cv2.MORPH_CROSS, (3, 3))
+        while True:
+            opened = cv2.morphologyEx(img, cv2.MORPH_OPEN, element)
+            temp = cv2.subtract(img, opened)
+            eroded = cv2.erode(img, element)
+            skel = cv2.bitwise_or(skel, temp)
+            img = eroded
+            if cv2.countNonZero(img) == 0:
+                break
+        return (skel > 0).astype(np.uint8)
 
     def detect_vertical_structures(self, points):
         """检测垂直结构（墙面、柱子等）"""
@@ -333,6 +478,15 @@ class PCDToGridMap:
         # 创建增强占用栅格地图
         occupancy_grid = self.create_enhanced_occupancy_grid(density_maps, grid_width, grid_height, height_span_map)
 
+        # 保存统计与网格元数据，供射线雕刻按回波使用
+        self._last_density_maps = density_maps
+        self._last_grid_meta = {
+            'origin_x': origin_x,
+            'origin_y': origin_y,
+            'width': grid_width,
+            'height': grid_height
+        }
+
         # 处理垂直结构
         if len(vertical_structures) > 0:
             occupancy_grid = self.apply_vertical_structure_constraints(occupancy_grid, vertical_structures, origin_x, origin_y)
@@ -411,7 +565,34 @@ class PCDToGridMap:
             kernel_size = 2 * pix_radius + 1
             kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
             obstacle_binary = (occupancy_grid == 100).astype(np.uint8)
+
+            # 门洞保护：在膨胀前计算到原始障碍的距离变换（像素）
+            min_door_width = float(getattr(self, 'min_door_width', 0.0) or 0.0)
+            dist_map = None
+            free_pre = (occupancy_grid == 0).astype(np.uint8)
+            skel_pre = None
+            if min_door_width > 0.0:
+                # 前景为非障碍(1)，背景为障碍(0)，计算到障碍的距离
+                dt_input = np.where(obstacle_binary == 1, 0, 1).astype(np.uint8)
+                dist_map = cv2.distanceTransform(dt_input, cv2.DIST_L2, 3)
+                min_half_pix = max(1, int(np.ceil((min_door_width / 2.0) / self.resolution)))
+                # 连通性约束：仅保护自由空间骨架附近，避免打开薄墙缝隙
+                skel_pre = self._skeletonize_binary(free_pre)
+
             inflated = cv2.dilate(obstacle_binary, kernel, iterations=1)
+
+            if dist_map is not None:
+                # 保护宽于阈值的通道：在这些区域不允许膨胀侵占
+                protect_mask = dist_map >= min_half_pix
+                # 仅恢复被膨胀新置为障碍且属于保护区域的像素
+                newly_inflated = (inflated == 1) & (obstacle_binary == 0)
+                to_restore = newly_inflated & protect_mask
+                if skel_pre is not None:
+                    k = cv2.getStructuringElement(cv2.MORPH_CROSS, (3, 3))
+                    skel_near = cv2.dilate(skel_pre, k, iterations=1).astype(bool)
+                    to_restore = to_restore & skel_near
+                inflated[to_restore] = 0
+
             occupancy_grid[inflated == 1] = 100
 
         # 可选：障碍开运算与小连通域清理，减少走廊内部黑点/毛刺
@@ -565,6 +746,36 @@ class PCDToGridMap:
                 f.write(f"  低信心度障碍物: {np.sum(occupancy_grid == 50)}\n")
                 f.write(f"  未知区域栅格: {np.sum(occupancy_grid == -1)}\n")
 
+            # 若存在雕刻前指标，输出到info并写JSON（便于GUI读取）
+            try:
+                pre = metadata.get('metrics_pre_carve')
+                metrics_json = output_file.with_name(output_file.stem + '_metrics.json')
+                post = {
+                    'obstacles': int(np.sum(occupancy_grid == 100)),
+                    'free': int(np.sum(occupancy_grid == 0)),
+                    'unknown': int(np.sum(occupancy_grid == -1))
+                }
+                if pre is not None:
+                    with open(info_file, 'a', encoding='utf-8') as f:
+                        f.write("\n射线雕刻前后统计对比:\n")
+                        f.write(f"  之前 - 障碍:{pre['obstacles']}, 自由:{pre['free']}, 未知:{pre['unknown']}\n")
+                        f.write(f"  之后 - 障碍:{post['obstacles']}, 自由:{post['free']}, 未知:{post['unknown']}\n")
+                # JSON保存
+                import json as _json
+                data_json = {
+                    'resolution': float(metadata['resolution']),
+                    'width': int(metadata['width']),
+                    'height': int(metadata['height']),
+                    'origin': [float(x) for x in metadata['origin']],
+                    'post': post
+                }
+                if pre is not None:
+                    data_json['pre'] = pre
+                with open(metrics_json, 'w', encoding='utf-8') as jf:
+                    _json.dump(data_json, jf, ensure_ascii=False)
+            except Exception as e:
+                print(f"写入指标JSON失败: {e}")
+
             print(f"转换信息已保存为: {info_file}")
             return True
         else:
@@ -603,13 +814,81 @@ class PCDToGridMap:
         # 点云预处理（可选）
         points = self.preprocess_points(points)
 
+        # 主方向对齐（可选）
+        yaw_deg = getattr(self, 'yaw_deg', None)
+        auto_pca = getattr(self, 'auto_yaw_pca', False)
+        if yaw_deg is None and auto_pca:
+            try:
+                yaw_deg = self.estimate_yaw_pca(points[:, :2])
+                print(f"PCA估计主方向旋转: {yaw_deg:.2f} 度")
+            except Exception as e:
+                print(f"PCA主方向估计失败: {e}")
+                yaw_deg = None
+        if yaw_deg is not None:
+            points = self.apply_yaw(points, yaw_deg)
+
         # 创建占用栅格地图
         occupancy_grid, metadata = self.create_occupancy_grid(points)
         if occupancy_grid is None:
             print("错误: 创建占用栅格地图失败")
             return False
 
-        # 保存栅格地图
+        # 在射线雕刻前记录一次指标（供对比）
+        pre_metrics = {
+            'obstacles': int(np.sum(occupancy_grid == 100)),
+            'free': int(np.sum(occupancy_grid == 0)),
+            'unknown': int(np.sum(occupancy_grid == -1))
+        }
+
+        # 射线雕刻（可选）
+        if getattr(self, 'ray_carve', False):
+            # 优先使用HBA轨迹，否则尝试从poses.txt提取平移
+            poses_xy = None
+            if getattr(self, 'hba_file', None):
+                hba = self.load_hba_poses(self.hba_file)
+                if hba is not None and hba.shape[0] > 0:
+                    poses_xy = hba[:, :2]
+            if poses_xy is None and getattr(self, 'poses_file', None):
+                # 解析poses.txt
+                arr = []
+                try:
+                    with open(self.poses_file, 'r', encoding='utf-8') as f:
+                        for line in f:
+                            line = line.strip()
+                            if not line or line.startswith('#'):
+                                continue
+                            ps = line.split()
+                            if len(ps) != 8:
+                                continue
+                            tx, ty, tz = map(float, ps[1:4])
+                            arr.append((tx, ty))
+                    if arr:
+                        poses_xy = np.array(arr, dtype=np.float64)
+                except Exception as e:
+                    print(f"读取poses.txt失败: {e}")
+            if poses_xy is not None:
+                mode = getattr(self, 'ray_mode', 'returns')
+                ox, oy = float(metadata['origin'][0]), float(metadata['origin'][1])
+                if mode == 'returns':
+                    occupancy_grid = self.ray_carve_by_returns(
+                        occupancy_grid, poses_xy,
+                        max_range=float(getattr(self, 'ray_max_range', 30.0) or 30.0),
+                        angle_step_deg=float(getattr(self, 'ray_angle_step_deg', 2.0) or 2.0),
+                        pose_stride=int(getattr(self, 'ray_pose_stride', 10) or 10)
+                    )
+                else:
+                    occupancy_grid = self.ray_carve_free(
+                        occupancy_grid, ox, oy, poses_xy,
+                        max_range=float(getattr(self, 'ray_max_range', 30.0) or 30.0),
+                        angle_step_deg=float(getattr(self, 'ray_angle_step_deg', 2.0) or 2.0),
+                        pose_stride=int(getattr(self, 'ray_pose_stride', 10) or 10)
+                    )
+        if occupancy_grid is None:
+            print("错误: 创建占用栅格地图失败")
+            return False
+
+        # 保存栅格地图（携带pre指标以便输出对比/JSON）
+        metadata['metrics_pre_carve'] = pre_metrics
         return self.save_occupancy_grid(occupancy_grid, metadata, output_file)
 
 def main():
@@ -654,6 +933,16 @@ def main():
                        help='障碍图开运算迭代次数(默认0=不启用)')
     parser.add_argument('--min-obstacle-area', type=int, default=0,
                        help='障碍最小连通域像素数，小于则清理(默认0=不启用)')
+    # 方向对齐与射线雕刻
+    parser.add_argument('--yaw-deg', type=float, default=None, help='绕Z轴旋转点云(度)，正为逆时针')
+    parser.add_argument('--auto-yaw-pca', action='store_true', help='自动PCA估计主方向并对齐x轴')
+    parser.add_argument('--ray-carve', action='store_true', help='启用射线雕刻：从轨迹向外发射射线，命中前强制自由')
+    parser.add_argument('--ray-mode', type=str, default='returns', choices=['returns','uniform'], help='射线模式：returns(按回波) 或 uniform(均匀扇形)')
+    parser.add_argument('--ray-angle-step-deg', type=float, default=2.0, help='射线角步长(度)，越小越密集')
+    parser.add_argument('--ray-max-range', type=float, default=30.0, help='射线最大范围(米)')
+    parser.add_argument('--ray-pose-stride', type=int, default=10, help='轨迹下采样步长（每N个位姿取1）')
+    parser.add_argument('--min-door-width', type=float, default=0.0,
+                       help='最小门洞净宽(米)。启用后，膨胀不会封闭≥该净宽的通道')
     # PGO patches 组装与 HBA ROI
     parser.add_argument('--patches-dir', type=str, default='', help='PGO输出的patches目录')
     parser.add_argument('--poses-file', type=str, default='', help='poses.txt路径；每行: name.pcd tx ty tz qw qx qy qz')
@@ -700,6 +989,15 @@ def main():
     converter.sor_std_ratio = args.sor_std_ratio
     converter.obstacle_open_iters = args.obstacle_open_iters
     converter.min_obstacle_area = args.min_obstacle_area
+    # 方向/射线参数
+    converter.yaw_deg = args.yaw_deg
+    converter.auto_yaw_pca = args.auto_yaw_pca
+    converter.ray_carve = args.ray_carve
+    converter.ray_mode = args.ray_mode
+    converter.ray_angle_step_deg = args.ray_angle_step_deg
+    converter.ray_max_range = args.ray_max_range
+    converter.ray_pose_stride = args.ray_pose_stride
+    converter.min_door_width = args.min_door_width
     # patches/HBA 配置
     converter.patches_dir = Path(args.patches_dir) if args.patches_dir else None
     converter.poses_file = Path(args.poses_file) if args.poses_file else None

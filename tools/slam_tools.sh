@@ -61,7 +61,8 @@ show_help() {
     echo ""
     echo -e "${YELLOW}可用命令:${NC}"
     echo -e "  ${CYAN}start${NC}     - 启动SLAM系统；支持子命令:"
-    echo -e "                 start realtime  # 应用实机预设并启动"
+    echo -e "                 start realtime         # 应用实机预设并启动"
+    echo -e "                 start nofilter         # 实机启动且禁用过滤桥（LIO直接吃 /livox/lidar）"
     echo -e "                 start replay --bag <dir> [--rate 1.0] [--loop] [--no-dynamic-filter]  # 应用回放预设并启动；可临时关闭动态过滤"
     echo -e "  ${CYAN}start-basic${NC} - 仅启动基础SLAM (fastlio2)"
     echo -e "  ${CYAN}stop${NC}      - 停止SLAM系统"
@@ -108,6 +109,9 @@ show_help() {
     echo "  $0 filter viz   # 启动过滤器可视化"
     echo "  $0 test filter  # 运行过滤器测试"
 }
+
+# 额外启动参数传递给协同launch（避免 set -u 未绑定）
+START_EXTRA_LAUNCH_ARGS=""
 
 # ------------------------- 功能模块 -------------------------
 
@@ -178,7 +182,8 @@ start_cooperative_slam_system() {
     warn "包含组件：Livox驱动 + FastLIO2 + PGO + HBA + Localizer + 优化协调器"
     warn "协同功能：双向优化反馈，智能协调器调度"
 
-    ros2 launch fastlio2 cooperative_slam_system.launch.py &
+    # 传递可选的额外启动参数（例如 enable_filter_bridge:=false）
+    ros2 launch fastlio2 cooperative_slam_system.launch.py ${START_EXTRA_LAUNCH_ARGS} &
     SLAM_SYSTEM_PID=$!
     echo $SLAM_SYSTEM_PID > /tmp/slam_coop.pid
     
@@ -428,55 +433,22 @@ fi
 
 case "${CMD}" in
     "start")
-        SUBCMD="${2-}"
-        if [[ "$SUBCMD" == "realtime" ]]; then
+        # 子命令下沉到函数，保持入口清晰
+        start_realtime() {
             echo -e "${CYAN}应用实机预设并启动SLAM系统...${NC}"
             python3 tools/apply_preset.py --mode realtime || die "应用实机预设失败"
             start_cooperative_slam_system
-        elif [[ "$SUBCMD" == "replay" ]]; then
-            shift 2 || true
-            BAG=""
-            RATE="1.0"
-            LOOP="false"
-            TOPICS=""
-            REMAPS=()
-            START_OFFSET=""
-            NO_DYN_FILTER="false"
-            while [[ $# -gt 0 ]]; do
-                case "$1" in
-                    --bag)
-                        BAG="${2-}"; shift 2;;
-                    --rate)
-                        RATE="${2-}"; shift 2;;
-                    --loop)
-                        LOOP="true"; shift;;
-                    --topics)
-                        TOPICS="${2-}"; shift 2;;
-                    --remap)
-                        REMAPS+=("${2-}"); shift 2;;
-                    --start-offset)
-                        START_OFFSET="${2-}"; shift 2;;
-                    --no-dynamic-filter|--disable-dynamic-filter)
-                        NO_DYN_FILTER="true"; shift;;
-                    *)
-                        echo -e "${YELLOW}忽略未知参数:${NC} $1"; shift;;
-                esac
-            done
-            echo -e "${CYAN}应用回放预设并启动SLAM系统...${NC}"
-            python3 tools/apply_preset.py --mode replay || die "应用回放预设失败"
-            load_ros_env
-            info "=== 启动协同SLAM（回放模式） ==="
-            cmd=(ros2 launch fastlio2 cooperative_slam_system.launch.py use_bag:=true use_sim_time:=true)
-            AUTO_PLAY="true"
-            if [[ -n "$TOPICS" || ${#REMAPS[@]} -gt 0 ]]; then
-                AUTO_PLAY="false"
-            fi
+        }
 
-            # 可选：临时禁用 Localizer 动态过滤，并将 PGO 改为吃 /slam/body_cloud
-            # 实现方式：在启动前备份并修改配置文件，退出时恢复
-            if [[ "$NO_DYN_FILTER" == "true" ]]; then
-                echo -e "${YELLOW}临时禁用 Localizer 动态过滤，并将 PGO 订阅改为 /slam/body_cloud${NC}"
-                py_edit_cfg='import sys,yaml,shutil
+        start_nofilter() {
+            echo -e "${CYAN}应用实机预设并禁用过滤桥，直接使用原始点云...${NC}"
+            python3 tools/apply_preset.py --mode realtime || die "应用实机预设失败"
+            START_EXTRA_LAUNCH_ARGS="enable_filter_bridge:=false"
+            start_cooperative_slam_system
+        }
+
+        patch_cfg_disable_dyn_filter() {
+            py_edit_cfg='import sys,yaml,shutil
 from pathlib import Path
 root=Path(".")
 src_loc=root/"ws_livox/src/localizer/config/localizer.yaml"
@@ -505,71 +477,102 @@ patch_loc(src_loc); patch_loc(inst_loc)
 patch_pgo(src_pgo); patch_pgo(inst_pgo)
 print("OK")
 '
-                python3 -c "$py_edit_cfg" >/dev/null 2>&1 || true
-                # 在清理阶段恢复备份
-                restore_cfg() {
-                    for pair in \
-                        "/tmp/localizer.yaml.bak:ws_livox/src/localizer/config/localizer.yaml" \
-                        "/tmp/localizer.install.yaml.bak:install/localizer/share/localizer/config/localizer.yaml" \
-                        "/tmp/pgo.yaml.bak:ws_livox/src/pgo/config/pgo.yaml" \
-                        "/tmp/pgo.install.yaml.bak:install/pgo/share/pgo/config/pgo.yaml"; do
-                        IFS=":" read -r bak dst <<< "$pair"
-                        if [[ -f "$bak" ]]; then
-                            cp -f "$bak" "$dst" 2>/dev/null || true
-                            rm -f "$bak" 2>/dev/null || true
-                        fi
-                    done
-                }
+            python3 -c "$py_edit_cfg" >/dev/null 2>&1 || true
+        }
+
+        restore_cfg_if_any() {
+            for pair in \
+                "/tmp/localizer.yaml.bak:ws_livox/src/localizer/config/localizer.yaml" \
+                "/tmp/localizer.install.yaml.bak:install/localizer/share/localizer/config/localizer.yaml" \
+                "/tmp/pgo.yaml.bak:ws_livox/src/pgo/config/pgo.yaml" \
+                "/tmp/pgo.install.yaml.bak:install/pgo/share/pgo/config/pgo.yaml"; do
+                IFS=":" read -r bak dst <<< "$pair"
+                if [[ -f "$bak" ]]; then
+                    cp -f "$bak" "$dst" 2>/dev/null || true
+                    rm -f "$bak" 2>/dev/null || true
+                fi
+            done
+        }
+
+        start_replay() {
+            shift 2 || true
+            local BAG=""
+            local RATE="1.0"
+            local LOOP="false"
+            local TOPICS=""
+            local REMAPS=()
+            local START_OFFSET=""
+            local NO_DYN_FILTER="false"
+            while [[ $# -gt 0 ]]; do
+                case "$1" in
+                    --bag)          BAG="${2-}"; shift 2;;
+                    --rate)         RATE="${2-}"; shift 2;;
+                    --loop)         LOOP="true"; shift;;
+                    --topics)       TOPICS="${2-}"; shift 2;;
+                    --remap)        REMAPS+=("${2-}"); shift 2;;
+                    --start-offset) START_OFFSET="${2-}"; shift 2;;
+                    --no-dynamic-filter|--disable-dynamic-filter)
+                                      NO_DYN_FILTER="true"; shift;;
+                    *)              echo -e "${YELLOW}忽略未知参数:${NC} $1"; shift;;
+                esac
+            done
+
+            echo -e "${CYAN}应用回放预设并启动SLAM系统...${NC}"
+            python3 tools/apply_preset.py --mode replay || die "应用回放预设失败"
+            load_ros_env
+            info "=== 启动协同SLAM（回放模式） ==="
+
+            local cmd=(ros2 launch fastlio2 cooperative_slam_system.launch.py use_bag:=true use_sim_time:=true)
+            local AUTO_PLAY="true"
+            if [[ -n "$TOPICS" || ${#REMAPS[@]} -gt 0 ]]; then AUTO_PLAY="false"; fi
+
+            if [[ "$NO_DYN_FILTER" == "true" ]]; then
+                echo -e "${YELLOW}临时禁用 Localizer 动态过滤，并将 PGO 订阅改为 /slam/body_cloud${NC}"
+                patch_cfg_disable_dyn_filter
             fi
+
             if [[ -n "$BAG" && "$AUTO_PLAY" == "true" ]]; then
                 cmd+=(auto_play_bag:=true bag_path:="$BAG" bag_rate:="$RATE")
-                if [[ "$LOOP" == "true" ]]; then
-                    cmd+=(bag_loop:=true)
-                else
-                    cmd+=(bag_loop:=false)
-                fi
+                if [[ "$LOOP" == "true" ]]; then cmd+=(bag_loop:=true); else cmd+=(bag_loop:=false); fi
             else
                 cmd+=(auto_play_bag:=false)
             fi
+
             "${cmd[@]}" &
-            SLAM_SYSTEM_PID=$!
+            local SLAM_SYSTEM_PID=$!
             echo $SLAM_SYSTEM_PID > /tmp/slam_coop.pid
             ok "🎬 协同SLAM已启动（回放模式），PID=$SLAM_SYSTEM_PID"
-            # 清理函数与信号处理（不要在EXIT时清理，以免立刻杀掉后台进程）
+
             cleanup() {
                 if [[ -f /tmp/slam_bag.pid ]]; then
-                    BAGPID=$(cat /tmp/slam_bag.pid 2>/dev/null || echo "");
+                    local BAGPID=$(cat /tmp/slam_bag.pid 2>/dev/null || echo "");
                     kill "$BAGPID" 2>/dev/null || true
                     rm -f /tmp/slam_bag.pid
                 fi
                 if [[ -f /tmp/slam_coop.pid ]]; then
-                    LPID=$(cat /tmp/slam_coop.pid 2>/dev/null || echo "");
+                    local LPID=$(cat /tmp/slam_coop.pid 2>/dev/null || echo "");
                     kill "$LPID" 2>/dev/null || true
                     rm -f /tmp/slam_coop.pid
                 fi
             }
-            # 仅在中断/终止信号时清理，避免脚本自然返回时提前杀进程
-            trap 'cleanup; restore_cfg 2>/dev/null || true' INT TERM
+            trap 'cleanup; restore_cfg_if_any 2>/dev/null || true' INT TERM
 
             if [[ -n "$BAG" && "$AUTO_PLAY" == "false" ]]; then
-                # 构造 ros2 bag play 命令，附带 topics 与 remaps
-                bag_cmd=(ros2 bag play "$BAG" --rate "$RATE" --clock)
+                local bag_cmd=(ros2 bag play "$BAG" --rate "$RATE" --clock)
                 if [[ "$LOOP" == "true" ]]; then bag_cmd+=(--loop); fi
                 if [[ -n "$START_OFFSET" ]]; then bag_cmd+=(--start-offset "$START_OFFSET"); fi
                 if [[ -n "$TOPICS" ]]; then
                     bag_cmd+=(--topics)
                     # shellcheck disable=SC2206
-                    TOPIC_ARR=($TOPICS)
+                    local TOPIC_ARR=($TOPICS)
                     for t in "${TOPIC_ARR[@]}"; do bag_cmd+=("$t"); done
                 fi
-                # 兜底remap：若 LIO 仍吃 /livox/lidar_filtered，则将原始 /livox/lidar 映射过去
-                LIO_CFG="ws_livox/src/fastlio2/config/lio.yaml"
+                local LIO_CFG="ws_livox/src/fastlio2/config/lio.yaml"
                 if [[ -f "$LIO_CFG" ]] && grep -q "lidar_topic: /livox/lidar_filtered" "$LIO_CFG"; then
                     REMAPS+=("/livox/lidar:=/livox/lidar_filtered")
                     warn "检测到 LIO 订阅 /livox/lidar_filtered，已自动添加 remap: /livox/lidar:=/livox/lidar_filtered"
                 fi
                 for r in "${REMAPS[@]}"; do bag_cmd+=(--remap "$r"); done
-                # 如果未指定 --topics，默认只播 IMU/LiDAR
                 if [[ -z "$TOPICS" ]]; then
                     bag_cmd+=(--topics /livox/imu /livox/lidar)
                     warn "未指定 --topics，默认只回放: /livox/imu /livox/lidar"
@@ -581,15 +584,22 @@ print("OK")
                 warn "使用 'ros2 bag play <dir>' 可手动回放；或通过 --bag 自动回放"
             fi
 
-            # 前台等待，避免脚本立即退出导致清理触发
             echo -e "${YELLOW}按 Ctrl+C 停止回放并关闭SLAM${NC}"
-            # 等待协同系统launch退出（正常或被中断），随后执行清理
             wait "$SLAM_SYSTEM_PID" 2>/dev/null || true
-            cleanup; restore_cfg 2>/dev/null || true
-        else
-            echo -e "${GREEN}启动完整SLAM系统 (所有可用组件)...${NC}"
-            start_cooperative_slam_system
-        fi
+            cleanup; restore_cfg_if_any 2>/dev/null || true
+        }
+
+        SUBCMD="${2-}"
+        case "$SUBCMD" in
+            "realtime"|"") start_realtime ;;
+            "nofilter")     start_nofilter ;;
+            "replay")       start_replay "$@" ;;
+            *)
+                echo -e "${YELLOW}未知的start子命令:${NC} $SUBCMD"
+                echo "用法: $0 start [realtime|nofilter|replay ...]"
+                exit 1
+                ;;
+        esac
         ;;
 
     "replay"|"replay-bag")
@@ -1299,6 +1309,9 @@ print("OK")
 
     "record")
         echo -e "${YELLOW}🎥 开始录制SLAM数据...${NC}"
+
+        # 确保已加载ROS环境与工作区（否则rosbag无法识别自定义消息类型）
+        load_ros_env
 
         # 检查录制工具是否存在
         RECORD_TOOL="$SCRIPT_DIR/record_data.py"

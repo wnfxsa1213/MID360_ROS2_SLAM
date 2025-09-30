@@ -12,9 +12,10 @@ def generate_launch_description():
     包含：FastLIO2 + PGO + HBA + Localizer + 优化协调器
     """
 
-    # 启动参数（bag回放/模拟时间）
+    # 启动参数（bag回放/模拟时间/是否启用过滤桥）
     use_bag = LaunchConfiguration('use_bag')
     use_sim_time = LaunchConfiguration('use_sim_time')
+    enable_filter_bridge = LaunchConfiguration('enable_filter_bridge')
     auto_play_bag = LaunchConfiguration('auto_play_bag')
     bag_path = LaunchConfiguration('bag_path')
     bag_rate = LaunchConfiguration('bag_rate')
@@ -27,8 +28,14 @@ def generate_launch_description():
         'MID360_config.json'
     ])
 
+    # LIO 配置（默认）
     lio_config_path = PathJoinSubstitution([
         FindPackageShare("fastlio2"), "config", "lio.yaml"
+    ])
+
+    # LIO 配置（禁用过滤桥：直接吃原始 /livox/lidar）
+    lio_config_no_filter_path = PathJoinSubstitution([
+        FindPackageShare("fastlio2"), "config", "lio_no_filter.yaml"
     ])
 
     pgo_config_path = PathJoinSubstitution([
@@ -59,6 +66,9 @@ def generate_launch_description():
         launch.actions.DeclareLaunchArgument(
             'use_sim_time', default_value='false',
             description='为true时为各节点启用模拟时间'),
+        launch.actions.DeclareLaunchArgument(
+            'enable_filter_bridge', default_value='true',
+            description='是否启用点云过滤桥（true: 使用 /livox/lidar_filtered；false: 直接使用 /livox/lidar）'),
         launch.actions.DeclareLaunchArgument(
             'auto_play_bag', default_value='false',
             description='为true且use_bag=true时，自动回放bag'),
@@ -111,10 +121,14 @@ def generate_launch_description():
                     'use_sim_time': use_sim_time,
                 }
             ],
-            condition=UnlessCondition(use_bag)
+            # 仅当未使用bag且显式启用过滤桥时启动
+            condition=launch.conditions.IfCondition(PythonExpression([
+                '("', use_bag, '" == "false") and ("', enable_filter_bridge, '" == "true")'
+            ]))
         ),
 
         # === 协同增强FAST-LIO2核心 ===
+        # LIO（启用过滤桥时使用标准配置，订阅 /livox/lidar_filtered）
         launch_ros.actions.Node(
             package="fastlio2",
             executable="lio_node",
@@ -128,7 +142,26 @@ def generate_launch_description():
                 ("/fastlio2/lio_path", "/slam/lio_path"),
                 ("/fastlio2/performance_metrics", "/slam/performance_metrics"),
                 ("/fastlio2/diagnostics", "/slam/diagnostics")
-            ]
+            ],
+            condition=launch.conditions.IfCondition(enable_filter_bridge)
+        ),
+
+        # LIO（禁用过滤桥时使用 no_filter 配置，直接订阅 /livox/lidar）
+        launch_ros.actions.Node(
+            package="fastlio2",
+            executable="lio_node",
+            name="fastlio2_node",
+            output="screen",
+            parameters=[{"config_path": lio_config_no_filter_path, 'use_sim_time': use_sim_time}],
+            remappings=[
+                ("/fastlio2/body_cloud", "/slam/body_cloud"),
+                ("/fastlio2/lio_odom", "/slam/lio_odom"),
+                ("/fastlio2/world_cloud", "/slam/world_cloud"),
+                ("/fastlio2/lio_path", "/slam/lio_path"),
+                ("/fastlio2/performance_metrics", "/slam/performance_metrics"),
+                ("/fastlio2/diagnostics", "/slam/diagnostics")
+            ],
+            condition=launch.conditions.UnlessCondition(enable_filter_bridge)
         ),
 
         # === PGO位姿图优化 ===
@@ -304,3 +337,6 @@ def generate_launch_description():
 # 回放（推荐）：
 #   ros2 launch fastlio2 cooperative_slam_system.launch.py use_bag:=true use_sim_time:=true
 #   另开终端播放：ros2 bag play <bag_dir>
+
+# 关闭过滤桥（直接使用 /livox/lidar 原始点云）：
+#   ros2 launch fastlio2 cooperative_slam_system.launch.py enable_filter_bridge:=false

@@ -17,6 +17,15 @@ compile_commands.json
 *.bag
 *.mcap
 data/rosbags/
+recorded_data/
+test_data/
+validation_results/
+
+# 地图与重建输出（体积大，避免入库）
+saved_maps/
+
+# 局部缓存/索引
+saved_maps/.pcd_index.json
 
 # 日志文件
 *.log

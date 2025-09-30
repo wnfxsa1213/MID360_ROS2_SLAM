@@ -66,3 +66,9 @@ Thumbs.db
 
 # 网络配置备份
 /etc/netplan/99-mid360.yaml.backup
+
+# Claude Code配置和文件
+.claude/
+*CLAUDE*
+*claude*
+config/backups/

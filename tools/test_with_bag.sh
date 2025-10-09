@@ -5,11 +5,43 @@
 
 set -e
 
-# 配置参数
+# 配置参数（可通过环境变量覆盖）
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
-BAG_PATH="$PROJECT_ROOT/data/rosbags/slam_data_20250918_104927/"
-RVIZ_CONFIG="$PROJECT_ROOT/ws_livox/src/localizer/rviz/localizer.rviz"
+DEFAULT_BAG_DIR="$PROJECT_ROOT/data/rosbags"
+BAG_PATH="${BAG_PATH:-}"
+RVIZ_CONFIG="${RVIZ_CONFIG:-$PROJECT_ROOT/ws_livox/src/localizer/rviz/localizer.rviz}"
+
+parse_args() {
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --bag)
+        BAG_PATH="$2"; shift 2 ;;
+      --rviz)
+        RVIZ_CONFIG="$2"; shift 2 ;;
+      --)
+        shift; break ;;
+      *)
+        break ;;
+    esac
+  done
+  REMAINING_ARGS="$@"
+}
+
+ensure_bag_path() {
+  if [[ -n "$BAG_PATH" ]]; then
+    return
+  fi
+  if [[ -d "$DEFAULT_BAG_DIR" ]]; then
+    latest=$(find "$DEFAULT_BAG_DIR" -maxdepth 1 -type d -name "*" ! -path "$DEFAULT_BAG_DIR" -printf '%T@ %p\n' 2>/dev/null | sort -nr | head -n1 | cut -d' ' -f2-)
+    if [[ -n "$latest" ]]; then
+      BAG_PATH="$latest"
+      return
+    fi
+  fi
+  log_error "未找到 bag 路径，请使用 --bag <path> 或设置 BAG_PATH 环境变量"
+  exit 1
+}
 
 # 颜色定义
 RED='\033[0;31m'
@@ -38,6 +70,8 @@ log_step() {
 # 检查依赖
 check_dependencies() {
     log_step "检查测试环境..."
+
+    ensure_bag_path
 
     # 检查bag文件
     if [ ! -f "$BAG_PATH/metadata.yaml" ]; then
@@ -257,6 +291,8 @@ trap cleanup EXIT INT TERM
 
 # 主程序
 main() {
+    parse_args "$@"
+    set -- $REMAINING_ARGS
     case "${1:-help}" in
         "play")
             check_dependencies

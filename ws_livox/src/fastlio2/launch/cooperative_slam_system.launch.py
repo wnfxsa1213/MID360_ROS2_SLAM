@@ -2,9 +2,19 @@
 
 import launch
 import launch_ros.actions
+from pathlib import Path
+import yaml
 from launch.substitutions import PathJoinSubstitution, LaunchConfiguration, PythonExpression
 from launch_ros.substitutions import FindPackageShare
 from launch.conditions import IfCondition, UnlessCondition
+
+PROJECT_ROOT = Path(__file__).resolve().parents[4]
+LAUNCH_CONFIG_FILE = PROJECT_ROOT / "config" / "launch_config.yaml"
+if LAUNCH_CONFIG_FILE.exists():
+    with open(LAUNCH_CONFIG_FILE, "r", encoding="utf-8") as f:
+        LAUNCH_CONFIG = yaml.safe_load(f)
+else:
+    LAUNCH_CONFIG = {}
 
 def generate_launch_description():
     """
@@ -54,6 +64,12 @@ def generate_launch_description():
         FindPackageShare("point_cloud_filter"), "config", "point_cloud_filter.yaml"
     ])
 
+    coordinator_config_path = PathJoinSubstitution([
+        FindPackageShare("cooperation"), "config", "coordinator.yaml"
+    ])
+
+    driver_cfg = LAUNCH_CONFIG.get("lidar", {})
+
     # RViz配置
     rviz_cfg = PathJoinSubstitution([
         FindPackageShare("fastlio2"), "rviz", "enhanced_fastlio2.rviz"
@@ -89,14 +105,14 @@ def generate_launch_description():
             name="livox_lidar_publisher",
             output="screen",
             parameters=[{
-                'xfer_format': 1,
-                'multi_topic': 0,
-                'data_src': 0,
-                'publish_freq': 10.0,
-                'output_data_type': 0,
-                'frame_id': 'livox_frame',
+                'xfer_format': driver_cfg.get('xfer_format', 1),
+                'multi_topic': driver_cfg.get('multi_topic', 0),
+                'data_src': driver_cfg.get('data_src', 0),
+                'publish_freq': driver_cfg.get('publish_freq', 10.0),
+                'output_data_type': driver_cfg.get('output_data_type', 0),
+                'frame_id': driver_cfg.get('frame_id', 'livox_frame'),
                 'user_config_path': livox_config_path,
-                'cmdline_input_bd_code': 'livox0000000001',
+                'cmdline_input_bd_code': driver_cfg.get('cmdline_input_bd_code', 'livox0000000001'),
                 'use_sim_time': use_sim_time,
             }],
             condition=UnlessCondition(use_bag)
@@ -112,14 +128,8 @@ def generate_launch_description():
             name="point_cloud_filter_bridge",
             output="screen",
             parameters=[
-                point_cloud_filter_config_path,  # 正确传入参数文件路径
-                {
-                    "input_topic": "/livox/lidar",
-                    "output_topic": "/livox/lidar_filtered",
-                    "debug_enabled": False,
-                    "max_processing_hz": 10.0,
-                    'use_sim_time': use_sim_time,
-                }
+                point_cloud_filter_config_path,
+                {'use_sim_time': use_sim_time}
             ],
             # 仅当未使用bag且显式启用过滤桥时启动
             condition=launch.conditions.IfCondition(PythonExpression([
@@ -200,13 +210,10 @@ def generate_launch_description():
             executable="optimization_coordinator",
             name="optimization_coordinator",
             output="screen",
-            parameters=[{
-                'drift_threshold': 0.15,     # 测试优化：更低的漂移阈值
-                'time_threshold': 15.0,      # 测试优化：更频繁的优化
-                'emergency_threshold': 0.5,  # 测试优化：更早的紧急处理
-                'auto_optimization': True,   # 启用自动优化
-                'use_sim_time': use_sim_time,
-            }],
+            parameters=[
+                coordinator_config_path,
+                {'use_sim_time': use_sim_time}
+            ],
             remappings=[
                 ("/coordinator/metrics", "/slam/coordination_metrics"),
                 ("/fastlio2/lio_odom", "/slam/lio_odom"),

@@ -131,6 +131,7 @@ public:
         m_pool_resize_counter = 0;
         
         m_timer = this->create_wall_timer(10ms, std::bind(&LIONode::timerCB, this));
+        last_world_cloud_publish_time_ = this->now();
     }
 
     void loadParameters()
@@ -399,6 +400,12 @@ public:
         {
             std::lock_guard<std::mutex> lock(m_state_data.path_mutex);
             m_state_data.path.poses.push_back(pose);
+            if (m_state_data.path.poses.size() > kMaxPathSize) {
+                auto erase_begin = m_state_data.path.poses.begin();
+                auto erase_end = erase_begin + (m_state_data.path.poses.size() - kMaxPathSize);
+                m_state_data.path.poses.erase(erase_begin, erase_end);
+            }
+            m_state_data.path.header.stamp = Utils::getTime(time);
             path_pub->publish(m_state_data.path);
         }
     }
@@ -738,17 +745,19 @@ public:
             CloudType::Ptr body_cloud = m_builder->lidar_processor()->transformCloud(m_package.cloud, m_kf->x().r_il, m_kf->x().t_il);
             publishCloud(m_body_cloud_pub, body_cloud, m_node_config.body_frame, m_package.cloud_end_time);
 
-            // 提升全局地图更新频率以增加点云密度
             static int global_map_counter = 0;
             global_map_counter++;
-            
-            // 每5帧发布一次全局地图 (之前每10帧)
-            if (global_map_counter % 5 == 0 && m_world_cloud_pub->get_subscription_count() > 0) {
+            const auto now_time = this->now();
+
+            if (m_world_cloud_pub->get_subscription_count() > 0 &&
+                global_map_counter % 10 == 0 &&
+                (now_time - last_world_cloud_publish_time_).seconds() >= 1.0) {
                 CloudType::Ptr world_cloud = m_builder->lidar_processor()->getGlobalMap();
-                
+
                 if (world_cloud && !world_cloud->empty()) {
                     publishCloud(m_world_cloud_pub, world_cloud, m_node_config.world_frame, m_package.cloud_end_time);
-                    RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 3000,
+                    last_world_cloud_publish_time_ = now_time;
+                    RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
                         "发布高密度全局地图，点数: %zu", world_cloud->size());
                 }
             }
@@ -776,6 +785,8 @@ public:
 private:
     rclcpp::Subscription<livox_ros_driver2::msg::CustomMsg>::SharedPtr m_lidar_sub;
     rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr m_imu_sub;
+
+    static constexpr size_t kMaxPathSize = 2000;
 
     rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr m_body_cloud_pub;
     rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr m_world_cloud_pub;
@@ -811,6 +822,9 @@ private:
     // 内存池管理统计
     size_t m_max_observed_cloud_size;
     int m_pool_resize_counter;
+
+    // 地图发布节流
+    rclcpp::Time last_world_cloud_publish_time_;
 
     // 协同状态
     struct CooperationState {

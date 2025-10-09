@@ -3,6 +3,9 @@
 #include <pcl/filters/voxel_grid.h>
 #include <pcl_conversions/pcl_conversions.h>
 
+#include <algorithm>
+#include <limits>
+
 namespace point_cloud_filter {
 
 PointCloudFilterBridge::PointCloudFilterBridge(const rclcpp::NodeOptions& options)
@@ -45,7 +48,7 @@ void PointCloudFilterBridge::initializeParameters() {
     
     this->declare_parameter<bool>("debug_enabled", false);
     this->declare_parameter<bool>("publish_stats", true);
-    this->declare_parameter<double>("max_processing_hz", 10.0);
+    this->declare_parameter<double>("max_processing_hz", 20.0);
 
     // 获取参数值
     input_topic_ = this->get_parameter("input_topic").as_string();
@@ -58,14 +61,14 @@ void PointCloudFilterBridge::initializeParameters() {
     max_processing_hz_ = this->get_parameter("max_processing_hz").as_double();
 
     // 计算最小处理间隔
-    if (max_processing_hz_ > 0) {
-        min_process_interval_ = std::chrono::milliseconds(
-            static_cast<int>(1000.0 / max_processing_hz_));
+    if (max_processing_hz_ > 0.0) {
+        min_process_interval_ = std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+            std::chrono::duration<double>(1.0 / max_processing_hz_));
     } else {
-        min_process_interval_ = std::chrono::milliseconds(0);
+        min_process_interval_ = std::chrono::steady_clock::duration::zero();
     }
 
-    last_process_time_ = std::chrono::high_resolution_clock::now();
+    last_process_time_ = std::chrono::steady_clock::now();
 }
 
 void PointCloudFilterBridge::initializeRosInterface() {
@@ -142,15 +145,15 @@ localizers::DynamicFilterConfig PointCloudFilterBridge::loadFilterConfig() {
 
     // 声明并获取动态过滤器参数
     this->declare_parameter<float>("dynamic_filter.motion_threshold", 0.05f);
-    this->declare_parameter<int>("dynamic_filter.history_size", 3);
-    this->declare_parameter<float>("dynamic_filter.stability_threshold", 0.8f);
+    this->declare_parameter<int>("dynamic_filter.history_size", 8);
+    this->declare_parameter<float>("dynamic_filter.stability_threshold", 0.75f);
     this->declare_parameter<double>("dynamic_filter.max_time_diff", 1.0);
     this->declare_parameter<float>("dynamic_filter.search_radius", 0.2f);
     this->declare_parameter<int>("dynamic_filter.min_neighbors", 8);
     this->declare_parameter<float>("dynamic_filter.normal_consistency_thresh", 0.8f);
     this->declare_parameter<float>("dynamic_filter.density_ratio_thresh", 0.5f);
-    this->declare_parameter<int>("dynamic_filter.downsample_ratio", 2);
-    this->declare_parameter<int>("dynamic_filter.max_points_per_frame", 50000);
+    this->declare_parameter<int>("dynamic_filter.downsample_ratio", 1);
+    this->declare_parameter<int>("dynamic_filter.max_points_per_frame", 60000);
     this->declare_parameter<float>("dynamic_filter.voxel_size_base", 0.01f);
 
     config.motion_threshold = this->get_parameter("dynamic_filter.motion_threshold").as_double();
@@ -196,8 +199,18 @@ void PointCloudFilterBridge::lidarCallback(const livox_ros_driver2::msg::CustomM
         }
         RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 2000, "PCL转换成功，点数: %zu", input_cloud->size());
 
+        // 构建原始点云元数据索引
+        last_input_cloud_ = input_cloud;
+        last_input_metadata_.assign(msg->points.begin(), msg->points.end());
+        if (last_input_cloud_ && !last_input_cloud_->empty()) {
+            input_kdtree_.setInputCloud(last_input_cloud_);
+            input_kdtree_ready_ = !last_input_metadata_.empty();
+        } else {
+            input_kdtree_ready_ = false;
+        }
+
         // 步骤2: 应用动态过滤器
-        double timestamp = getCurrentTimestamp();
+        double timestamp = rclcpp::Time(msg->header.stamp).seconds();
         RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 2000, "开始动态过滤处理...");
         CloudType::Ptr filtered_cloud = dynamic_filter_->filterDynamicObjects(input_cloud, timestamp);
 
@@ -279,9 +292,12 @@ livox_ros_driver2::msg::CustomMsg::SharedPtr PointCloudFilterBridge::pclToCustom
     custom_msg->lidar_id = original_msg->lidar_id;
     custom_msg->rsvd = original_msg->rsvd;
 
-    // 直接基于过滤后的点云生成 CustomMsg，避免 O(N^2) 匹配造成卡顿
+    // 直接基于过滤后的点云生成 CustomMsg，同时回填原始元数据
     const size_t n = cloud ? cloud->size() : 0;
     custom_msg->points.reserve(n);
+
+    std::vector<int> nn_indices(1);
+    std::vector<float> nn_dists(1);
 
     for (size_t i = 0; i < n; ++i) {
         const auto& p = cloud->points[i];
@@ -289,12 +305,38 @@ livox_ros_driver2::msg::CustomMsg::SharedPtr PointCloudFilterBridge::pclToCustom
         out.x = p.x;
         out.y = p.y;
         out.z = p.z;
-        // intensity 在 customMsgToPCL 中由 reflectivity 赋值，这里复用
-        out.reflectivity = static_cast<uint8_t>(std::max(0.0f, std::min(255.0f, p.intensity)));
-        // 无法可靠恢复 tag/line/offset_time，使用保守默认值
-        out.tag = 0;
-        out.line = 0;
-        out.offset_time = 0;
+        
+        uint8_t reflectivity = static_cast<uint8_t>(std::clamp(p.intensity, 0.0f, 255.0f));
+        uint8_t tag = 0;
+        uint8_t line = 0;
+        uint32_t offset_time = 0;
+
+        if (input_kdtree_ready_ && last_input_cloud_ && !last_input_cloud_->empty()) {
+            if (input_kdtree_.nearestKSearch(p, 1, nn_indices, nn_dists) > 0) {
+                const auto& src_point = last_input_metadata_.at(static_cast<size_t>(nn_indices[0]));
+                reflectivity = src_point.reflectivity;
+                tag = src_point.tag;
+                line = src_point.line;
+                offset_time = src_point.offset_time;
+            } else if (!last_input_metadata_.empty()) {
+                const auto& fallback = last_input_metadata_.at(std::min(i, last_input_metadata_.size() - 1));
+                reflectivity = fallback.reflectivity;
+                tag = fallback.tag;
+                line = fallback.line;
+                offset_time = fallback.offset_time;
+            }
+        } else if (!last_input_metadata_.empty()) {
+            const auto& fallback = last_input_metadata_.at(std::min(i, last_input_metadata_.size() - 1));
+            reflectivity = fallback.reflectivity;
+            tag = fallback.tag;
+            line = fallback.line;
+            offset_time = fallback.offset_time;
+        }
+
+        out.reflectivity = reflectivity;
+        out.tag = tag;
+        out.line = line;
+        out.offset_time = offset_time;
         custom_msg->points.push_back(out);
     }
 
@@ -303,10 +345,9 @@ livox_ros_driver2::msg::CustomMsg::SharedPtr PointCloudFilterBridge::pclToCustom
 }
 
 bool PointCloudFilterBridge::checkProcessingRate() {
-    auto current_time = std::chrono::high_resolution_clock::now();
+    auto current_time = std::chrono::steady_clock::now();
     
-    if (std::chrono::duration_cast<std::chrono::milliseconds>(
-        current_time - last_process_time_) < min_process_interval_) {
+    if (current_time - last_process_time_ < min_process_interval_) {
         return false;
     }
     
@@ -362,12 +403,6 @@ bool PointCloudFilterBridge::validateCustomMsg(
     }
     
     return true;
-}
-
-double PointCloudFilterBridge::getCurrentTimestamp() {
-    auto now = std::chrono::high_resolution_clock::now();
-    auto duration = now.time_since_epoch();
-    return std::chrono::duration<double>(duration).count();
 }
 
 void PointCloudFilterBridge::logPerformanceStats(

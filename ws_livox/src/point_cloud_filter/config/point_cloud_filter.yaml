@@ -8,15 +8,16 @@ point_cloud_filter_bridge:
     publish_stats: true
     max_processing_hz: 20.0
     dynamic_filter:
-      debug_enabled: false
+      enable: true
+      publish_stats: true
       motion_threshold: 0.1
-      history_size: 15
-      stability_threshold: 0.8
+      history_size: 8
+      stability_threshold: 0.75
       max_time_diff: 0.5
       search_radius: 0.2
       min_neighbors: 10
       normal_consistency_thresh: 0.8
       density_ratio_thresh: 0.5
-      downsample_ratio: 2
-      max_points_per_frame: 50000
-      voxel_size_base: 0.05
+      downsample_ratio: 1
+      max_points_per_frame: 60000
+      voxel_size_base: 0.01

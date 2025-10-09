@@ -5,6 +5,8 @@ debug:
   performance_monitor: true
   verbose: false
 lidar:
+  cmdline_input_bd_code: livox0000000001
+  data_src: 0
   extrinsic:
     pitch: 0.0
     roll: 0.0
@@ -13,8 +15,11 @@ lidar:
     yaw: 0.0
     z: 0.0
   frame_id: livox_frame
+  multi_topic: 0
+  output_data_type: 0
   pcl_data_type: 1
   publish_freq: 10.0
+  xfer_format: 1
 network:
   gateway: 192.168.1.1
   host_ip: 192.168.1.50

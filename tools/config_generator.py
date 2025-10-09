@@ -61,6 +61,7 @@ class ConfigGenerator:
             "ws_livox/src/hba/config/hba.yaml",
             "ws_livox/src/localizer/config/localizer.yaml",
             "ws_livox/src/point_cloud_filter/config/point_cloud_filter.yaml",
+            "ws_livox/src/cooperation/config/coordinator.yaml",
             "ws_livox/src/fastlio2/rviz/enhanced_fastlio2.rviz"
         ]
 
@@ -79,6 +80,9 @@ class ConfigGenerator:
         """
         try:
             mc = self.master_config
+
+            pc_cfg = mc['fastlio2'].get('point_cloud', {})
+            buffer_cfg = mc['fastlio2'].get('buffer_management', {})
 
             # 构建lio.yaml配置
             lio_config = {
@@ -119,12 +123,15 @@ class ConfigGenerator:
                 't_il': mc['calibration']['lidar_to_imu']['translation'],
 
                 # 点云匹配参数
-                'lidar_cov_inv': mc['fastlio2']['point_cloud']['lidar_cov_inv'],
+                'lidar_cov_inv': pc_cfg.get('lidar_cov_inv', 2000.0),
+                'lidar_cov_scale': pc_cfg.get('lidar_cov_scale', 1.0),
+                'point_filter_num': pc_cfg.get('point_filter_num', 4),
+                'converge_thresh': pc_cfg.get('converge_thresh', 1e-4),
 
                 # 缓冲区管理参数 (内存安全和线程优化)
-                'max_imu_buffer_size': mc['fastlio2']['buffer_management']['max_imu_buffer_size'],
-                'max_lidar_buffer_size': mc['fastlio2']['buffer_management']['max_lidar_buffer_size'],
-                'enable_buffer_monitoring': mc['fastlio2']['buffer_management']['enable_buffer_monitoring'],
+                'max_imu_buffer_size': buffer_cfg.get('max_imu_buffer_size', 8000),
+                'max_lidar_buffer_size': buffer_cfg.get('max_lidar_buffer_size', 1000),
+                'enable_buffer_monitoring': buffer_cfg.get('enable_buffer_monitoring', True),
             }
 
             # 生成配置文件
@@ -164,6 +171,7 @@ class ConfigGenerator:
         try:
             mc = self.master_config
             net = mc['network']
+            drv = mc['livox_driver']
 
             # 构建MID360_config.json配置
             livox_config = {
@@ -186,16 +194,25 @@ class ConfigGenerator:
                         "point_data_ip": net['host']['ip'],
                         "point_data_port": net['lidar']['host_ports']['point_data'],
                         "imu_data_ip": net['host']['ip'],
-                        "imu_data_port": net['lidar']['host_ports']['imu_data'],
-                        "log_data_ip": "",
-                        "log_data_port": net['lidar']['host_ports']['log_data']
+                    "imu_data_port": net['lidar']['host_ports']['imu_data'],
+                    "log_data_ip": "",
+                    "log_data_port": net['lidar']['host_ports']['log_data']
                     }
+                },
+                "driver_params": {
+                    "xfer_format": drv.get("xfer_format", 1),
+                    "multi_topic": drv.get("multi_topic", 0),
+                    "data_src": drv.get("data_src", 0),
+                    "publish_freq": drv.get("publish_freq", 10.0),
+                    "output_data_type": drv.get("output_data_type", 0),
+                    "frame_id": drv.get("frame_id", "livox_frame"),
+                    "cmdline_input_bd_code": drv.get("cmdline_input_bd_code", "")
                 },
                 "lidar_configs": [
                     {
                         "ip": net['lidar']['ip'],
-                        "pcl_data_type": mc['livox_driver']['lidar_config']['pcl_data_type'],
-                        "pattern_mode": mc['livox_driver']['lidar_config']['pattern_mode'],
+                        "pcl_data_type": drv['lidar_config']['pcl_data_type'],
+                        "pattern_mode": drv['lidar_config']['pattern_mode'],
                         "extrinsic_parameter": {
                             "roll": mc['calibration']['lidar_to_baselink']['rotation_rpy'][0],
                             "pitch": mc['calibration']['lidar_to_baselink']['rotation_rpy'][1],
@@ -253,6 +270,11 @@ class ConfigGenerator:
                     "pcl_data_type": mc['livox_driver']['lidar_config']['pcl_data_type'],
                     "publish_freq": mc['livox_driver']['publish_freq'],
                     "frame_id": mc['livox_driver']['frame_id'],
+                    "xfer_format": mc['livox_driver']['xfer_format'],
+                    "multi_topic": mc['livox_driver']['multi_topic'],
+                    "data_src": mc['livox_driver']['data_src'],
+                    "output_data_type": mc['livox_driver']['output_data_type'],
+                    "cmdline_input_bd_code": mc['livox_driver'].get('cmdline_input_bd_code', ''),
                     "extrinsic": {
                         "x": mc['calibration']['lidar_to_baselink']['translation'][0],
                         "y": mc['calibration']['lidar_to_baselink']['translation'][1],
@@ -311,6 +333,13 @@ class ConfigGenerator:
                 max_val = constraints['publish_freq']['max']
                 if not (min_val <= freq <= max_val):
                     issues.append(f"publish_freq ({freq}) 超出范围 [{min_val}, {max_val}]")
+
+            if 'imu_init_num' in constraints:
+                imu_init = mc['fastlio2']['algorithm']['imu_init_num']
+                min_val = constraints['imu_init_num']['min']
+                max_val = constraints['imu_init_num']['max']
+                if not (min_val <= imu_init <= max_val):
+                    issues.append(f"imu_init_num ({imu_init}) 超出范围 [{min_val}, {max_val}]")
 
             # 验证外参一致性
             lidar_to_imu_trans = mc['calibration']['lidar_to_imu']['translation']
@@ -499,7 +528,6 @@ class ConfigGenerator:
             # 注意：Localizer节点期望YAML中为嵌套的dynamic_filter: {...}
             if 'dynamic_filter' in mc['localizer']:
                 dynamic_filter_config = mc['localizer']['dynamic_filter'].copy()
-                # 正确写入为嵌套字段，而不是扁平展开
                 localizer_config['dynamic_filter'] = dynamic_filter_config
 
             # 生成配置文件
@@ -552,6 +580,7 @@ class ConfigGenerator:
             def get_df(k, default):
                 return df.get(k, default)
 
+            df_enable = bool(df.get('enable', True))
             params = {
                 'point_cloud_filter_bridge': {
                     'ros__parameters': {
@@ -562,16 +591,17 @@ class ConfigGenerator:
                         'stats_topic': '/point_cloud_filter/filter_stats',
 
                         # 控制
-                        'debug_enabled': False,
-                        'publish_stats': True,
-                        'max_processing_hz': 20.0,
+                        'debug_enabled': bool(df.get('debug_enabled', False)),
+                        'publish_stats': bool(df.get('publish_stats', True)),
+                        'max_processing_hz': float(df.get('max_processing_hz', 20.0)),
 
                         # 动态过滤器
                         'dynamic_filter': {
-                            'debug_enabled': get_df('enable', False) is True,  # 若Localizer启用，则默认打开调试
+                            'enable': df_enable,
+                            'publish_stats': bool(df.get('publish_stats', True)),
                             'motion_threshold': float(get_df('motion_threshold', 0.1)),
-                            'history_size': int(get_df('history_size', 3)),
-                            'stability_threshold': float(get_df('stability_threshold', 0.8)),
+                            'history_size': int(get_df('history_size', 8)),
+                            'stability_threshold': float(get_df('stability_threshold', 0.75)),
                             'max_time_diff': float(get_df('max_time_diff', 1.0)),
 
                             'search_radius': float(get_df('search_radius', 0.2)),
@@ -579,9 +609,9 @@ class ConfigGenerator:
                             'normal_consistency_thresh': float(get_df('normal_consistency_thresh', 0.8)),
                             'density_ratio_thresh': float(get_df('density_ratio_thresh', 0.5)),
 
-                            'downsample_ratio': int(get_df('downsample_ratio', 4)),
-                            'max_points_per_frame': int(get_df('max_points_per_frame', 50000)),
-                            'voxel_size_base': float(get_df('voxel_size_base', 0.05)),
+                            'downsample_ratio': int(get_df('downsample_ratio', 1)),
+                            'max_points_per_frame': int(get_df('max_points_per_frame', 60000)),
+                            'voxel_size_base': float(get_df('voxel_size_base', 0.01)),
                         }
                     }
                 }
@@ -607,6 +637,36 @@ class ConfigGenerator:
             return True
         except Exception as e:
             print(f"✗ 生成点云过滤参数失败: {e}")
+            return False
+
+    def generate_cooperation_config(self) -> bool:
+        """生成协同优化协调器配置 (coordinator.yaml)
+
+        Returns:
+            是否生成成功
+        """
+        try:
+            coop = self.master_config.get('cooperation', {})
+            params = {
+                'coordinator': {
+                    'ros__parameters': {
+                        'drift_threshold': coop.get('drift_threshold', 0.5),
+                        'time_threshold': coop.get('time_threshold', 60.0),
+                        'emergency_threshold': coop.get('emergency_threshold', 2.0),
+                        'auto_optimization': coop.get('auto_optimization', True)
+                    }
+                }
+            }
+
+            output_path = self.project_root / "ws_livox/src/cooperation/config/coordinator.yaml"
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(output_path, 'w', encoding='utf-8') as f:
+                yaml.dump(params, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
+
+            print(f"✓ 成功生成协同协调器配置: {output_path}")
+            return True
+        except Exception as e:
+            print(f"✗ 生成协同配置失败: {e}")
             return False
 
     def generate_rviz_config(self) -> bool:
@@ -1005,6 +1065,7 @@ Window Geometry:
         success &= self.generate_hba_config()
         success &= self.generate_localizer_config()
         success &= self.generate_point_cloud_filter_config()
+        success &= self.generate_cooperation_config()
         success &= self.generate_rviz_config()
 
         print()

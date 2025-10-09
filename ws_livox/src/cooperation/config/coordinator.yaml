@@ -1,0 +1,6 @@
+coordinator:
+  ros__parameters:
+    drift_threshold: 0.5
+    time_threshold: 60.0
+    emergency_threshold: 2.0
+    auto_optimization: true

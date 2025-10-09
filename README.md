@@ -436,6 +436,17 @@ ws_livox/src/
     └── point_cloud_filter.yaml # 过滤器配置（自动生成）
 ```
 
+> ⚠️ **生成器覆盖范围提示**  
+> 当前 `tools/config_generator.py` 仅同步上述文件中的“核心字段”。如下参数仍需手动维护：
+>
+> - `fastlio2` 里的 `point_cloud.lidar_cov_scale`、`point_filter_num`、`converge_thresh` 等高级项；
+> - `livox_driver` 的话题格式/多话题开关（在 launch 中仍是硬编码）；
+> - `localizer.dynamic_filter.enable` 与过滤桥的启停开关、`max_processing_hz` 等；
+> - `cooperation`、`monitoring` 模块的阈值与频率设置；
+> - RViz 显示布尔开关（`visualization.display.*`）；
+>
+> 在调整上述参数时，请直接编辑对应子配置或 launch 文件，并将改动同步回 `master_config.yaml` 以免后续生成覆盖。
+
 ### 修改配置的标准流程
 
 ```bash
@@ -538,6 +549,9 @@ gtsam       # 安装GTSAM库
 deps        # 检查依赖状态
 fix         # 修复已知问题
 ```
+
+> ℹ️ **Legacy 脚本**  
+> 旧版网络诊断等脚本已移动到 `tools/legacy/`，默认不会被主流程调用，使用前请手动检查并更新参数。
 
 ### 使用示例
 

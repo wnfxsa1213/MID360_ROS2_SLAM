@@ -8,10 +8,12 @@
 #include <pcl/point_cloud.h>
 #include <pcl/point_types.h>
 #include <pcl_conversions/pcl_conversions.h>
+#include <pcl/kdtree/kdtree_flann.h>
 
 #include <memory>
 #include <string>
 #include <chrono>
+#include <vector>
 
 // 引入localizer的头文件
 #include "localizers/dynamic_object_filter.h"
@@ -91,16 +93,28 @@ private:
     // ================ 性能统计 ================
     
     /// 上次处理时间
-    std::chrono::high_resolution_clock::time_point last_process_time_;
+    std::chrono::steady_clock::time_point last_process_time_;
     
     /// 处理时间间隔限制
-    std::chrono::milliseconds min_process_interval_;
+    std::chrono::steady_clock::duration min_process_interval_;
     
     /// 总处理帧数
     size_t total_frames_processed_;
     
     /// 启动时间
     std::chrono::high_resolution_clock::time_point start_time_;
+
+    /// 最近一次输入点云（用于元数据回填）
+    CloudType::Ptr last_input_cloud_;
+
+    /// 最近一次输入点云的原始 Livox 点信息
+    std::vector<livox_ros_driver2::msg::CustomPoint> last_input_metadata_;
+
+    /// 输入点云 KD-Tree，用于最近邻映射
+    pcl::KdTreeFLANN<PointType> input_kdtree_;
+
+    /// KD-Tree 是否准备就绪
+    bool input_kdtree_ready_{false};
 
     // ================ 核心回调函数 ================
 
@@ -183,12 +197,6 @@ private:
      * @return 是否有效
      */
     bool validateCustomMsg(const livox_ros_driver2::msg::CustomMsg::SharedPtr& msg);
-
-    /**
-     * @brief 计算当前时间戳（秒）
-     * @return 时间戳
-     */
-    double getCurrentTimestamp();
 
     /**
      * @brief 记录性能统计信息

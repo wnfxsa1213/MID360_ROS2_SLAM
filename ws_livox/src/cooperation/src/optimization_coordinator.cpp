@@ -8,6 +8,7 @@
 #include "interface/srv/get_optimized_pose.hpp"
 #include "interface/srv/refine_map.hpp"
 #include "interface/srv/relocalize.hpp"
+#include <algorithm>
 #include <queue>
 #include <mutex>
 #include <thread>
@@ -21,6 +22,18 @@ struct OptimizationTask {
     rclcpp::Time created_time;
     std::string component_name;
     bool emergency = false;
+};
+
+struct TaskComparator {
+    bool operator()(const OptimizationTask& lhs, const OptimizationTask& rhs) const {
+        if (lhs.emergency != rhs.emergency) {
+            return rhs.emergency; // emergency == true takes precedence
+        }
+        if (lhs.priority != rhs.priority) {
+            return lhs.priority < rhs.priority; // higher priority first
+        }
+        return lhs.created_time > rhs.created_time; // FIFO for equal priority
+    }
 };
 
 struct SystemMetrics {
@@ -93,7 +106,7 @@ private:
 
     // 系统状态
     SystemMetrics m_metrics;
-    std::queue<OptimizationTask> m_task_queue;
+    std::priority_queue<OptimizationTask, std::vector<OptimizationTask>, TaskComparator> m_task_queue;
     std::mutex m_queue_mutex;
     std::mutex m_metrics_mutex;
 
@@ -234,9 +247,10 @@ private:
         std::lock_guard<std::mutex> lock(m_queue_mutex);
 
         if (m_task_queue.empty()) return;
-        if (m_metrics.optimization_in_progress && !m_task_queue.front().emergency) return;
+        const OptimizationTask& peek_task = m_task_queue.top();
+        if (m_metrics.optimization_in_progress && !peek_task.emergency) return;
 
-        OptimizationTask task = m_task_queue.front();
+        OptimizationTask task = peek_task;
         m_task_queue.pop();
 
         // 异步执行任务
@@ -441,13 +455,36 @@ private:
 
     void metricsCallback(const std_msgs::msg::Float64MultiArray::SharedPtr msg)
     {
-        if (msg->data.size() >= 3) {
-            double fitness_score = msg->data[2];
-
-            if (fitness_score > 0.1) {
-                m_metrics.cumulative_drift += 0.01;
-            }
+        if (msg->data.empty()) {
+            return;
         }
+
+        const double processing_time_ms = msg->data[0];
+        const double point_count = msg->data.size() > 1 ? msg->data[1] : 0.0;
+        const double imu_buffer = msg->data.size() > 2 ? msg->data[2] : 0.0;
+        const double lidar_buffer = msg->data.size() > 3 ? msg->data[3] : 0.0;
+
+        double penalty = 0.0;
+        if (processing_time_ms > 40.0) {
+            penalty += (processing_time_ms - 40.0) * 0.002; // 时间越久越容易漂移
+        }
+        if (point_count > 0.0 && point_count < 12000.0) {
+            penalty += 0.02; // 点云过稀
+        }
+        if (imu_buffer > 5.0) {
+            penalty += (imu_buffer - 5.0) * 0.002;
+        }
+        if (lidar_buffer > 3.0) {
+            penalty += (lidar_buffer - 3.0) * 0.003;
+        }
+
+        // 指标低通滤波，避免抖动
+        m_metrics.cumulative_drift = std::clamp(
+            m_metrics.cumulative_drift * 0.98 + penalty,
+            0.0,
+            m_config.emergency_threshold * 2.0);
+
+        m_metrics.last_optimization_score = std::clamp(1.0 - penalty, 0.0, 1.0);
     }
 
     void triggerOptimizationCB(

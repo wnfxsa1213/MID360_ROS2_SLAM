@@ -1,6 +1,8 @@
 #include <queue>
 #include <mutex>
 #include <filesystem>
+#include <vector>
+#include <ament_index_cpp/get_package_share_directory.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/point_cloud2.hpp>
 #include <nav_msgs/msg/odometry.hpp>
@@ -112,6 +114,9 @@ public:
         }
         RCLCPP_INFO(this->get_logger(), "LOAD FROM YAML CONFIG PATH: %s", config_path.c_str());
 
+        this->declare_parameter<bool>("use_external_filter", true);
+        m_use_external_filter = this->get_parameter("use_external_filter").as_bool();
+
         m_config.cloud_topic = config["cloud_topic"].as<std::string>();
         m_config.odom_topic = config["odom_topic"].as<std::string>();
         m_config.map_frame = config["map_frame"].as<std::string>();
@@ -129,37 +134,63 @@ public:
         m_localizer_config.refine_score_thresh = config["refine_score_thresh"].as<double>();
 
         // 加载动态过滤器配置
+        localizers::DynamicFilterConfig filter_defaults;
+        bool enable_default = true;
+        bool publish_stats_default = true;
         if (config["dynamic_filter"]) {
             auto filter_config = config["dynamic_filter"];
-            m_config.enable_dynamic_filter = filter_config["enable"].as<bool>(true);
-            m_config.publish_filter_stats = filter_config["publish_stats"].as<bool>(true);
+            if (filter_config["config_file"]) {
+                m_filter_config_path = filter_config["config_file"].as<std::string>("");
+                auto resolved = resolveConfigPath(m_filter_config_path);
+                if (resolved.empty()) {
+                    RCLCPP_WARN(this->get_logger(),
+                                "未找到动态过滤器配置文件: %s，使用内置默认值",
+                                m_filter_config_path.c_str());
+                    m_filter_config_path.clear();
+                } else {
+                    m_filter_config_path = resolved;
+                    loadFilterConfigFromFile(m_filter_config_path, filter_defaults, enable_default, publish_stats_default);
+                }
+            }
+
+            m_filter_config = filter_defaults;
+            m_config.enable_dynamic_filter = filter_config["enable"].as<bool>(enable_default);
+            m_config.publish_filter_stats = filter_config["publish_stats"].as<bool>(publish_stats_default);
 
             // 时间一致性参数
-            m_filter_config.motion_threshold = filter_config["motion_threshold"].as<float>(0.1f);
-            m_filter_config.history_size = filter_config["history_size"].as<int>(5);
-            m_filter_config.stability_threshold = filter_config["stability_threshold"].as<float>(0.8f);
-            m_filter_config.max_time_diff = filter_config["max_time_diff"].as<double>(0.5);
+            m_filter_config.motion_threshold = filter_config["motion_threshold"].as<float>(m_filter_config.motion_threshold);
+            m_filter_config.history_size = filter_config["history_size"].as<int>(m_filter_config.history_size);
+            m_filter_config.stability_threshold = filter_config["stability_threshold"].as<float>(m_filter_config.stability_threshold);
+            m_filter_config.max_time_diff = filter_config["max_time_diff"].as<double>(m_filter_config.max_time_diff);
 
             // 几何特征参数
-            m_filter_config.search_radius = filter_config["search_radius"].as<float>(0.2f);
-            m_filter_config.min_neighbors = filter_config["min_neighbors"].as<int>(10);
-            m_filter_config.normal_consistency_thresh = filter_config["normal_consistency_thresh"].as<float>(0.8f);
-            m_filter_config.density_ratio_thresh = filter_config["density_ratio_thresh"].as<float>(0.5f);
+            m_filter_config.search_radius = filter_config["search_radius"].as<float>(m_filter_config.search_radius);
+            m_filter_config.min_neighbors = filter_config["min_neighbors"].as<int>(m_filter_config.min_neighbors);
+            m_filter_config.normal_consistency_thresh = filter_config["normal_consistency_thresh"].as<float>(m_filter_config.normal_consistency_thresh);
+            m_filter_config.density_ratio_thresh = filter_config["density_ratio_thresh"].as<float>(m_filter_config.density_ratio_thresh);
 
             // 性能参数
-            m_filter_config.downsample_ratio = filter_config["downsample_ratio"].as<int>(2);
-            m_filter_config.max_points_per_frame = filter_config["max_points_per_frame"].as<int>(50000);
-            m_filter_config.voxel_size_base = filter_config["voxel_size_base"].as<float>(0.01f);
+            m_filter_config.downsample_ratio = filter_config["downsample_ratio"].as<int>(m_filter_config.downsample_ratio);
+            m_filter_config.max_points_per_frame = filter_config["max_points_per_frame"].as<int>(m_filter_config.max_points_per_frame);
+            m_filter_config.voxel_size_base = filter_config["voxel_size_base"].as<float>(m_filter_config.voxel_size_base);
         } else {
             // 使用默认配置
-            m_config.enable_dynamic_filter = true;
-            m_config.publish_filter_stats = true;
-            // m_filter_config已经使用默认值初始化
+            m_config.enable_dynamic_filter = enable_default;
+            m_config.publish_filter_stats = publish_stats_default;
+            m_filter_config = filter_defaults;
         }
 
         // 验证动态过滤器配置
         if (m_config.enable_dynamic_filter && !m_filter_config.isValid()) {
             RCLCPP_ERROR(this->get_logger(), "Invalid dynamic filter configuration! Disabling dynamic filter.");
+            m_config.enable_dynamic_filter = false;
+        }
+
+        if (m_use_external_filter) {
+            if (m_config.enable_dynamic_filter) {
+                RCLCPP_INFO(this->get_logger(),
+                            "检测到 use_external_filter=true，禁用本地动态过滤器，改用外部预过滤点云");
+            }
             m_config.enable_dynamic_filter = false;
         }
 
@@ -470,6 +501,8 @@ private:
     // 动态过滤器相关
     localizers::DynamicFilterConfig m_filter_config;
     std::shared_ptr<localizers::DynamicObjectFilter> m_dynamic_filter;
+    bool m_use_external_filter{true};
+    std::string m_filter_config_path;
 
     message_filters::Subscriber<sensor_msgs::msg::PointCloud2> m_cloud_sub;
     message_filters::Subscriber<nav_msgs::msg::Odometry> m_odom_sub;
@@ -482,6 +515,131 @@ private:
     rclcpp::Publisher<interface::msg::FilterStats>::SharedPtr m_filter_stats_pub;
     rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr m_filtered_cloud_pub;
     rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr m_dynamic_cloud_pub;
+
+    std::string resolveConfigPath(const std::string& path) const
+    {
+        namespace fs = std::filesystem;
+        if (path.empty())
+        {
+            return "";
+        }
+
+        fs::path candidate(path);
+        if (candidate.is_absolute())
+        {
+            return fs::exists(candidate) ? candidate.lexically_normal().string() : "";
+        }
+
+        std::vector<fs::path> search_roots;
+        try
+        {
+            search_roots.emplace_back(ament_index_cpp::get_package_share_directory("localizer"));
+        }
+        catch (const std::exception &)
+        {
+        }
+        try
+        {
+            search_roots.emplace_back(ament_index_cpp::get_package_share_directory("point_cloud_filter"));
+        }
+        catch (const std::exception &)
+        {
+        }
+        search_roots.emplace_back(fs::current_path());
+
+        for (const auto &root : search_roots)
+        {
+            fs::path resolved = root / candidate;
+            if (fs::exists(resolved))
+            {
+                return resolved.lexically_normal().string();
+            }
+        }
+        return "";
+    }
+
+    void loadFilterConfigFromFile(const std::string& path,
+                                  localizers::DynamicFilterConfig& defaults,
+                                  bool& enable_default,
+                                  bool& publish_stats_default)
+    {
+        try
+        {
+            YAML::Node root = YAML::LoadFile(path);
+            if (!root["dynamic_filter"])
+            {
+                RCLCPP_WARN(this->get_logger(),
+                            "动态过滤器配置文件缺少 dynamic_filter 节点: %s",
+                            path.c_str());
+                return;
+            }
+
+            auto df = root["dynamic_filter"];
+            if (df["enable"])
+            {
+                enable_default = df["enable"].as<bool>(enable_default);
+            }
+            if (df["publish_stats"])
+            {
+                publish_stats_default = df["publish_stats"].as<bool>(publish_stats_default);
+            }
+            if (df["motion_threshold"])
+            {
+                defaults.motion_threshold = static_cast<float>(df["motion_threshold"].as<double>(defaults.motion_threshold));
+            }
+            if (df["history_size"])
+            {
+                defaults.history_size = df["history_size"].as<int>(defaults.history_size);
+            }
+            if (df["stability_threshold"])
+            {
+                defaults.stability_threshold = static_cast<float>(df["stability_threshold"].as<double>(defaults.stability_threshold));
+            }
+            if (df["max_time_diff"])
+            {
+                defaults.max_time_diff = df["max_time_diff"].as<double>(defaults.max_time_diff);
+            }
+            if (df["search_radius"])
+            {
+                defaults.search_radius = static_cast<float>(df["search_radius"].as<double>(defaults.search_radius));
+            }
+            if (df["min_neighbors"])
+            {
+                defaults.min_neighbors = df["min_neighbors"].as<int>(defaults.min_neighbors);
+            }
+            if (df["normal_consistency_thresh"])
+            {
+                defaults.normal_consistency_thresh = static_cast<float>(df["normal_consistency_thresh"].as<double>(defaults.normal_consistency_thresh));
+            }
+            if (df["density_ratio_thresh"])
+            {
+                defaults.density_ratio_thresh = static_cast<float>(df["density_ratio_thresh"].as<double>(defaults.density_ratio_thresh));
+            }
+            if (df["downsample_ratio"])
+            {
+                defaults.downsample_ratio = df["downsample_ratio"].as<int>(defaults.downsample_ratio);
+            }
+            if (df["max_points_per_frame"])
+            {
+                defaults.max_points_per_frame = df["max_points_per_frame"].as<int>(defaults.max_points_per_frame);
+            }
+            if (df["voxel_size_base"])
+            {
+                defaults.voxel_size_base = static_cast<float>(df["voxel_size_base"].as<double>(defaults.voxel_size_base));
+            }
+
+            RCLCPP_INFO(this->get_logger(),
+                        "已从动态过滤器配置文件加载默认参数: %s",
+                        path.c_str());
+        }
+        catch (const std::exception &e)
+        {
+            RCLCPP_WARN(this->get_logger(),
+                        "加载动态过滤器配置文件失败(%s): %s",
+                        path.c_str(),
+                        e.what());
+        }
+    }
 };
 int main(int argc, char **argv)
 {

@@ -1,307 +1,221 @@
-# =============================================================================
-# Livox MID360 SLAM 系统主配置文件
-# =============================================================================
-# 版本: 2.0
-# 描述: 基于Livox MID360的实时SLAM建图系统完整配置
-# =============================================================================
-
-# 系统基本信息配置
 system:
-  name: MID360_SLAM_System                    # 系统名称标识
-  version: '2.0'                             # 系统版本号  
-  description: 基于Livox MID360的实时SLAM建图系统  # 系统描述
-
-# 网络连接配置 - 配置主机与激光雷达的网络连接参数
+  name: MID360_SLAM_System
+  version: '2.0'
+  description: 基于Livox MID360的实时SLAM建图系统
 network:
-  # 主机网络配置
   host:
-    ip: 192.168.1.50                         # 主机IP地址，需要与雷达在同一网段
-    interface: enp7s0                        # 网络接口名称，使用ifconfig查看
-    gateway: 192.168.1.1                     # 网关地址
-    netmask: 255.255.255.0                   # 子网掩码
-  
-  # Livox激光雷达网络配置
+    ip: 192.168.1.50
+    interface: enp7s0
+    gateway: 192.168.1.1
+    netmask: 255.255.255.0
   lidar:
-    ip: 192.168.1.3                          # 雷达IP地址，出厂默认为192.168.1.3
-    # 雷达端口配置 - 雷达向这些端口发送数据
+    ip: 192.168.1.3
     lidar_ports:
-      cmd_data: 56100                        # 命令数据端口
-      push_msg: 56200                        # 推送消息端口  
-      point_data: 56300                      # 点云数据端口
-      imu_data: 56400                        # IMU数据端口
-      log_data: 56500                        # 日志数据端口
-    # 主机接收端口配置 - 主机在这些端口监听雷达数据
+      cmd_data: 56100
+      push_msg: 56200
+      point_data: 56300
+      imu_data: 56400
+      log_data: 56500
     host_ports:
-      cmd_data: 56101                        # 主机命令接收端口
-      push_msg: 56201                        # 主机消息接收端口
-      point_data: 56301                      # 主机点云接收端口
-      imu_data: 56401                        # 主机IMU接收端口
-      log_data: 56501                        # 主机日志接收端口
-
-# 传感器标定参数配置
+      cmd_data: 56101
+      push_msg: 56201
+      point_data: 56301
+      imu_data: 56401
+      log_data: 56501
 calibration:
-  # 激光雷达到IMU的外参标定
   lidar_to_imu:
-    # 平移向量 [x, y, z] 单位：米
     translation:
-    - 0.011                                  # X轴平移，前进方向
-    - 0.02329                               # Y轴平移，左侧方向  
-    - -0.04412                              # Z轴平移，上方向
-    # 旋转矩阵 3x3，行优先存储
+    - 0.011
+    - 0.02329
+    - -0.04412
     rotation:
-    - 1.0                                   # R11: 旋转矩阵第1行第1列
-    - 0.0                                   # R12: 旋转矩阵第1行第2列
-    - 0.0                                   # R13: 旋转矩阵第1行第3列
-    - 0.0                                   # R21: 旋转矩阵第2行第1列
-    - 1.0                                   # R22: 旋转矩阵第2行第2列
-    - 0.0                                   # R23: 旋转矩阵第2行第3列
-    - 0.0                                   # R31: 旋转矩阵第3行第1列
-    - 0.0                                   # R32: 旋转矩阵第3行第2列
-    - 1.0                                   # R33: 旋转矩阵第3行第3列
-  
-  # 激光雷达到机器人基坐标系的外参
+    - 1.0
+    - 0.0
+    - 0.0
+    - 0.0
+    - 1.0
+    - 0.0
+    - 0.0
+    - 0.0
+    - 1.0
   lidar_to_baselink:
-    # 平移向量 [x, y, z] 单位：米
     translation:
-    - 0.0                                   # X轴平移，相对机器人中心
-    - 0.0                                   # Y轴平移，相对机器人中心
-    - 0.0                                   # Z轴平移，相对机器人中心
-    # 旋转角度 [roll, pitch, yaw] 单位：弧度
+    - 0.0
+    - 0.0
+    - 0.0
     rotation_rpy:
-    - 0.0                                   # Roll角，绕X轴旋转
-    - 0.0                                   # Pitch角，绕Y轴旋转
-    - 0.0                                   # Yaw角，绕Z轴旋转
-
-# 坐标系定义配置
+    - 0.0
+    - 0.0
+    - 0.0
 frames:
-  world_frame: odom                          # 世界坐标系名称，通常为odom或map
-  base_frame: base_link                      # 机器人基坐标系名称
-  lidar_frame: livox_frame                   # 激光雷达坐标系名称
-
-# ROS话题配置 - 定义系统各模块间的通信话题
+  world_frame: odom
+  base_frame: base_link
+  lidar_frame: livox_frame
 topics:
-  imu: /livox/imu                           # IMU数据话题
-  lidar: /livox/lidar_filtered              # 滤波后的激光雷达点云话题
-  odometry: /slam/lio_odom                  # LIO里程计话题
-  path: /slam/lio_path                      # SLAM轨迹路径话题
-  body_cloud: /slam/body_cloud              # 机体坐标系点云话题
-  world_cloud: /slam/world_cloud            # 世界坐标系点云话题
-  loop_markers: /slam/loop_markers          # 回环检测标记话题
-  hba_map: /hba/map_points                  # HBA地图点话题
-  performance: /slam/performance_metrics    # 性能指标话题
-  diagnostics: /slam/diagnostics            # 系统诊断话题
-
-# Livox驱动配置参数
+  imu: /livox/imu
+  lidar: /livox/lidar
+  odometry: /slam/lio_odom
+  path: /slam/lio_path
+  body_cloud: /slam/body_cloud
+  world_cloud: /slam/world_cloud
+  loop_markers: /slam/loop_markers
+  hba_map: /hba/map_points
+  performance: /slam/performance_metrics
+  diagnostics: /slam/diagnostics
 livox_driver:
-  xfer_format: 1                            # 数据传输格式: 0=点云, 1=IMU+点云
-  multi_topic: 0                            # 多话题模式: 0=单话题, 1=多话题
-  data_src: 0                               # 数据源: 0=雷达, 1=文件
-  publish_freq: 10.0                        # 发布频率 (Hz)，推荐10-20Hz
-  output_data_type: 0                       # 输出数据类型: 0=PointXYZRTL, 1=PointXYZI
-  frame_id: livox_frame                     # 雷达坐标系ID
-  cmdline_input_bd_code: livox0000000001    # 雷达序列号，用于多雷达区分
-  
-  # 雷达内部配置
+  xfer_format: 1
+  multi_topic: 0
+  data_src: 0
+  publish_freq: 10.0
+  output_data_type: 0
+  frame_id: livox_frame
+  cmdline_input_bd_code: livox0000000001
   lidar_config:
-    pcl_data_type: 1                        # PCL数据类型: 0=PointXYZ, 1=PointXYZI
-    pattern_mode: 0                         # 扫描模式: 0=非重复, 1=重复, 2=低功耗
-
-# FAST-LIO2算法配置参数  
+    pcl_data_type: 1
+    pattern_mode: 0
 fastlio2:
-  # 调试和性能监控
-  print_time_cost: true                     # 是否打印算法耗时信息
-  
-  # 点云预处理参数
-  lidar_filter_num: 1                       # 激光雷达滤波器数量
-  lidar_min_range: 0.3                      # 最小有效距离 (米)，过滤近距离噪点
-  lidar_max_range: 30.0                     # 最大有效距离 (米)，超出则丢弃
-  scan_resolution: 0.2                      # 扫描分辨率 (米)，影响下采样精度
-  map_resolution: 0.25                      # 地图分辨率 (米)，影响地图精度
-  
-  # 地图管理参数
-  cube_len: 100                             # 立方体地图边长 (米)
-  det_range: 30                             # 检测范围 (米)，关联点搜索半径
-  move_thresh: 0.8                          # 移动阈值 (米)，触发地图更新的距离
-  
-  # IMU噪声模型参数
+  print_time_cost: true
+  lidar_filter_num: 1
+  lidar_min_range: 0.3
+  lidar_max_range: 30.0
+  scan_resolution: 0.2
+  map_resolution: 0.25
+  cube_len: 100
+  det_range: 30
+  move_thresh: 0.8
   imu_noise:
-    accelerometer: 0.005                    # 加速度计噪声标准差 (m/s²)
-    gyroscope: 0.005                        # 陀螺仪噪声标准差 (rad/s)
-    acc_bias: 0.0001                        # 加速度计偏置噪声 (m/s²)
-    gyro_bias: 5.0e-05                      # 陀螺仪偏置噪声 (rad/s)
-  
-  # 算法核心参数
+    accelerometer: 0.005
+    gyroscope: 0.005
+    acc_bias: 0.0001
+    gyro_bias: 5.0e-05
   algorithm:
-    imu_init_num: 500                       # IMU初始化数据点数，影响初始化精度
-    near_search_num: 8                      # 近邻搜索点数，影响匹配精度
-    ieskf_max_iter: 6                       # 迭代式EKF最大迭代次数
-    gravity_align: true                     # 是否启用重力对齐
-    esti_il: false                          # 是否估计雷达-IMU外参
-  
-  # 点云处理参数
+    imu_init_num: 500
+    near_search_num: 8
+    ieskf_max_iter: 6
+    gravity_align: true
+    esti_il: false
   point_cloud:
-    lidar_cov_inv: 2000.0                   # 激光雷达协方差逆矩阵权重
-    lidar_cov_scale: 1.0                    # 激光雷达协方差尺度因子
-    point_filter_num: 4                     # 点滤波器数量
-    converge_thresh: 0.0001                 # 收敛阈值，判断优化收敛
-  
-  # 缓冲区管理
+    lidar_cov_inv: 2000.0
+    lidar_cov_scale: 1.0
+    point_filter_num: 4
+    converge_thresh: 0.0001
   buffer_management:
-    max_imu_buffer_size: 8000               # IMU缓冲区最大大小
-    max_lidar_buffer_size: 1000              # 激光雷达缓冲区最大大小
-    enable_buffer_monitoring: true          # 启用缓冲区监控
-  
-  # 输入话题配置
-  lidar_topic: /livox/lidar_filtered        # 激光雷达输入话题
-  imu_topic: /livox/imu                     # IMU输入话题
-
-# 可视化配置
+    max_imu_buffer_size: 8000
+    max_lidar_buffer_size: 1000
+    enable_buffer_monitoring: true
+  lidar_topic: /livox/lidar
+  imu_topic: /livox/imu
 visualization:
-  # RViz可视化配置
   rviz:
-    auto_start: true                        # 是否自动启动RViz
-    config_file: enhanced_fastlio2.rviz     # RViz配置文件名
-    # 显示选项
+    auto_start: true
+    config_file: enhanced_fastlio2.rviz
     display:
-      pointcloud: true                      # 显示点云
-      trajectory: true                      # 显示轨迹
-      tf_frames: true                       # 显示坐标系变换
-      imu_pose: true                        # 显示IMU姿态
-      diagnostics: true                     # 显示诊断信息
-
-# ROS包记录配置
+      pointcloud: true
+      trajectory: true
+      tf_frames: true
+      imu_pose: true
+      diagnostics: true
 rosbag:
-  auto_record: false                        # 是否自动开始录制包
-  # 需要录制的话题列表
+  auto_record: false
   topics:
-  - /livox/lidar                            # 原始激光雷达数据
-  - /livox/imu                              # IMU数据
-  - /slam/lio_odom                          # SLAM里程计
-  - /slam/lio_path                          # SLAM路径
-  - /slam/body_cloud                        # 机体点云
-  - /tf                                     # 坐标变换
-  - /tf_static                              # 静态坐标变换
-  output_dir: data/rosbags                  # 录制文件输出目录
-  compression_format: zstd                  # 压缩格式: none, zstd, lz4
-  max_duration: 0                           # 最大录制时长(秒)，0为无限制
-
-# 系统监控配置
+  - /livox/lidar
+  - /livox/imu
+  - /slam/lio_odom
+  - /slam/lio_path
+  - /slam/body_cloud
+  - /slam/world_cloud
+  - /tf
+  - /tf_static
+  output_dir: data/rosbags
+  compression_format: zstd
+  max_duration: 0
 monitoring:
-  # 性能监控
   performance:
-    enable_metrics: true                    # 启用性能指标监控
-    publish_frequency: 1.0                  # 指标发布频率 (Hz)
-  
-  # 诊断监控  
+    enable_metrics: true
+    publish_frequency: 1.0
   diagnostics:
-    enable_diagnostics: true                # 启用系统诊断
-    check_frequency: 2.0                    # 诊断检查频率 (Hz)
-  
-  # 日志配置
+    enable_diagnostics: true
+    check_frequency: 2.0
   logging:
-    level: INFO                             # 日志级别: DEBUG, INFO, WARN, ERROR
-    verbose: false                          # 详细日志模式
-
-# 位姿图优化(PGO)配置
+    level: INFO
+    verbose: false
 pgo:
-  cloud_topic: /slam/body_cloud             # 输入点云话题
-  odom_topic: /slam/lio_odom                # 输入里程计话题
-  map_frame: map                            # 地图坐标系
-  local_frame: lidar                        # 局部坐标系
-  key_pose_delta_deg: 10                    # 关键帧角度阈值 (度)
-  key_pose_delta_trans: 0.3                 # 关键帧平移阈值 (米)
-  loop_search_radius: 5.0                   # 回环搜索半径 (米)
-  loop_time_tresh: 10.0                     # 回环时间阈值 (秒)
-  loop_score_tresh: 0.3                     # 回环匹配分数阈值
-  loop_submap_half_range: 5                 # 回环子地图半径 (关键帧数)
-  submap_resolution: 0.1                    # 子地图分辨率 (米)
-  min_loop_detect_duration: 2.0             # 最小回环检测间隔 (秒)
-
-# 层次束调整(HBA)配置
+  cloud_topic: /localizer/filtered_cloud
+  odom_topic: /slam/lio_odom
+  map_frame: map
+  local_frame: lidar
+  key_pose_delta_deg: 10
+  key_pose_delta_trans: 0.3
+  loop_search_radius: 5.0
+  loop_time_tresh: 10.0
+  loop_score_tresh: 0.3
+  loop_submap_half_range: 5
+  submap_resolution: 0.1
+  min_loop_detect_duration: 2.0
 hba:
-  scan_resolution: 0.1                      # 扫描分辨率 (米)
-  window_size: 20                           # 滑动窗口大小 (关键帧数)
-  stride: 10                                # 处理步长 (关键帧数)
-  voxel_size: 0.5                           # 体素大小 (米)
-  min_point_num: 10                         # 体素内最小点数
-  max_layer: 3                              # 最大层数
-  plane_thresh: 0.01                        # 平面拟合阈值 (米)
-  ba_max_iter: 10                           # BA最大迭代次数
-  hba_iter: 5                               # HBA迭代次数
-  down_sample: 0.1                          # 下采样体素大小 (米)
-
-# 定位器配置
+  scan_resolution: 0.1
+  window_size: 20
+  stride: 10
+  voxel_size: 0.5
+  min_point_num: 10
+  max_layer: 3
+  plane_thresh: 0.01
+  ba_max_iter: 10
+  hba_iter: 5
+  down_sample: 0.1
 localizer:
-  cloud_topic: /slam/body_cloud             # 输入点云话题
-  odom_topic: /slam/lio_odom                # 输入里程计话题  
-  map_frame: map                            # 地图坐标系
-  local_frame: lidar                        # 局部坐标系
-  update_hz: 1.0                            # 更新频率 (Hz)
-  
-  # 粗定位配置
+  cloud_topic: /slam/body_cloud
+  odom_topic: /slam/lio_odom
+  map_frame: map
+  local_frame: lidar
+  update_hz: 1.0
   rough_localization:
-    scan_resolution: 0.25                   # 扫描分辨率 (米)
-    map_resolution: 0.25                    # 地图分辨率 (米)
-    max_iteration: 5                        # 最大迭代次数
-    score_thresh: 0.2                       # 匹配分数阈值
-  
-  # 精定位配置
+    scan_resolution: 0.25
+    map_resolution: 0.25
+    max_iteration: 5
+    score_thresh: 0.2
   refine_localization:
-    scan_resolution: 0.1                    # 扫描分辨率 (米)
-    map_resolution: 0.1                     # 地图分辨率 (米)
-    max_iteration: 10                       # 最大迭代次数
-    score_thresh: 0.1                       # 匹配分数阈值
-  
-  # 动态滤波配置
+    scan_resolution: 0.1
+    map_resolution: 0.1
+    max_iteration: 10
+    score_thresh: 0.1
   dynamic_filter:
-    enable: true                            # 启用动态物体滤波
-    publish_stats: true                     # 发布统计信息
-    max_processing_hz: 20.0                 # 过滤桥最大处理频率 (Hz)
-    motion_threshold: 0.1                   # 运动阈值 (米)
-    history_size: 8                         # 历史帧数量
-    stability_threshold: 0.75               # 稳定性阈值
-    max_time_diff: 0.5                      # 最大时间差 (秒)
-    search_radius: 0.2                      # 搜索半径 (米)
-    min_neighbors: 10                       # 最小邻居数
-    normal_consistency_thresh: 0.8          # 法向量一致性阈值
-    density_ratio_thresh: 0.5               # 密度比阈值
-    downsample_ratio: 1                     # 下采样比例
-    max_points_per_frame: 60000             # 每帧最大点数
-    voxel_size_base: 0.01                   # 基础体素大小 (米)
-
-# 协同SLAM配置
+    enable: true
+    publish_stats: true
+    max_processing_hz: 20.0
+    motion_threshold: 0.1
+    history_size: 8
+    stability_threshold: 0.75
+    max_time_diff: 0.5
+    search_radius: 0.2
+    min_neighbors: 10
+    normal_consistency_thresh: 0.8
+    density_ratio_thresh: 0.5
+    downsample_ratio: 1
+    max_points_per_frame: 60000
+    voxel_size_base: 0.01
 cooperation:
-  enable: true                              # 启用协同功能
-  drift_threshold: 0.5                      # 漂移阈值 (米)
-  time_threshold: 60.0                      # 时间阈值 (秒)
-  emergency_threshold: 2.0                  # 紧急阈值 (米)
-  auto_optimization: true                   # 自动优化
-  
-  # 多机器人配置
+  enable: true
+  drift_threshold: 0.5
+  time_threshold: 60.0
+  emergency_threshold: 2.0
+  auto_optimization: true
   multi_agent:
-    max_agents: 4                           # 最大机器人数量
-    communication_freq: 5.0                 # 通信频率 (Hz)
-
-# 参数验证配置
+    max_agents: 4
+    communication_freq: 5.0
 validation:
-  # 启用的检查项目
   checks:
-    network_connectivity: true              # 网络连通性检查
-    calibration_consistency: true           # 标定一致性检查
-    topic_availability: true                # 话题可用性检查
-    parameter_ranges: true                  # 参数范围检查
-  
-  # 参数约束条件
+    network_connectivity: true
+    calibration_consistency: true
+    topic_availability: true
+    parameter_ranges: true
   constraints:
-    # 激光雷达最大距离约束
     lidar_max_range:
-      min: 1.0                              # 最小值 (米)
-      max: 100.0                            # 最大值 (米)
-    # 发布频率约束
+      min: 1.0
+      max: 100.0
     publish_freq:
-      min: 1.0                              # 最小值 (Hz)
-      max: 50.0                             # 最大值 (Hz)
-    # IMU初始化点数约束
+      min: 1.0
+      max: 50.0
     imu_init_num:
-      min: 50                               # 最小值
-      max: 1000                             # 最大值
+      min: 50
+      max: 1000

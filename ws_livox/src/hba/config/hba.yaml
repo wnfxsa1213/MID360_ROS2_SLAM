@@ -1,6 +1,6 @@
 # HBA配置文件
 # 由配置生成器自动生成，请勿手动修改
-# 生成时间: 2025-10-09 13:08:18
+# 生成时间: 2025-10-18 01:51:46
 # 主配置文件: /home/tianyu/codes/Mid360map/config/master_config.yaml
 
 ba_max_iter: 10

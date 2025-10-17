@@ -78,7 +78,8 @@ public:
             std::bind(&LIONode::lidarCB, this, std::placeholders::_1));
 
         m_body_cloud_pub = this->create_publisher<sensor_msgs::msg::PointCloud2>("fastlio2/body_cloud", 10000);
-        m_world_cloud_pub = this->create_publisher<sensor_msgs::msg::PointCloud2>("fastlio2/world_cloud", 10000);
+        m_world_cloud_pub_internal = this->create_publisher<sensor_msgs::msg::PointCloud2>("fastlio2/world_cloud_internal", 10000);
+        m_world_cloud_pub_legacy = this->create_publisher<sensor_msgs::msg::PointCloud2>("fastlio2/world_cloud", 10000);
         m_path_pub = this->create_publisher<nav_msgs::msg::Path>("fastlio2/lio_path", 10000);
         m_odom_pub = this->create_publisher<nav_msgs::msg::Odometry>("fastlio2/lio_odom", 10000);
         m_imu_pose_pub = this->create_publisher<visualization_msgs::msg::Marker>("fastlio2/imu_pose_marker", 100);
@@ -346,7 +347,7 @@ public:
 
     void publishCloud(rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pub, CloudType::Ptr cloud, std::string frame_id, const double &time)
     {
-        if (pub->get_subscription_count() <= 0)
+        if (!pub || pub->get_subscription_count() <= 0)
             return;
         sensor_msgs::msg::PointCloud2 cloud_msg;
         pcl::toROSMsg(*cloud, cloud_msg);
@@ -749,14 +750,19 @@ public:
             global_map_counter++;
             const auto now_time = this->now();
 
-            if (m_world_cloud_pub->get_subscription_count() > 0 &&
+            bool has_internal_sub = m_world_cloud_pub_internal && m_world_cloud_pub_internal->get_subscription_count() > 0;
+            bool has_legacy_sub = m_world_cloud_pub_legacy && m_world_cloud_pub_legacy->get_subscription_count() > 0;
+            bool should_publish_world = !m_world_cloud_published_once || has_internal_sub || has_legacy_sub;
+
+            if (should_publish_world &&
                 global_map_counter % 10 == 0 &&
                 (now_time - last_world_cloud_publish_time_).seconds() >= 1.0) {
                 CloudType::Ptr world_cloud = m_builder->lidar_processor()->getGlobalMap();
-
                 if (world_cloud && !world_cloud->empty()) {
-                    publishCloud(m_world_cloud_pub, world_cloud, m_node_config.world_frame, m_package.cloud_end_time);
+                    publishCloud(m_world_cloud_pub_internal, world_cloud, m_node_config.world_frame, m_package.cloud_end_time);
+                    publishCloud(m_world_cloud_pub_legacy, world_cloud, m_node_config.world_frame, m_package.cloud_end_time);
                     last_world_cloud_publish_time_ = now_time;
+                    m_world_cloud_published_once = true;
                     RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
                         "发布高密度全局地图，点数: %zu", world_cloud->size());
                 }
@@ -789,7 +795,8 @@ private:
     static constexpr size_t kMaxPathSize = 2000;
 
     rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr m_body_cloud_pub;
-    rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr m_world_cloud_pub;
+    rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr m_world_cloud_pub_internal;
+    rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr m_world_cloud_pub_legacy;
     rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr m_path_pub;
     rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr m_odom_pub;
     rclcpp::Publisher<visualization_msgs::msg::Marker>::SharedPtr m_imu_pose_pub;
@@ -825,6 +832,7 @@ private:
 
     // 地图发布节流
     rclcpp::Time last_world_cloud_publish_time_;
+    bool m_world_cloud_published_once = false;
 
     // 协同状态
     struct CooperationState {

@@ -1,7 +1,7 @@
 point_cloud_filter_bridge:
   ros__parameters:
     input_topic: /livox/lidar
-    output_topic: /livox/lidar_filtered
+    output_topic: /livox/lidar
     debug_topic: /point_cloud_filter/debug_cloud
     stats_topic: /point_cloud_filter/filter_stats
     debug_enabled: false

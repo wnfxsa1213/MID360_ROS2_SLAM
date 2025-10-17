@@ -5,6 +5,10 @@
 
 #include <algorithm>
 #include <limits>
+#include <filesystem>
+#include <vector>
+#include <yaml-cpp/yaml.h>
+#include <ament_index_cpp/get_package_share_directory.hpp>
 
 namespace point_cloud_filter {
 
@@ -40,25 +44,44 @@ PointCloudFilterBridge::PointCloudFilterBridge(const rclcpp::NodeOptions& option
 }
 
 void PointCloudFilterBridge::initializeParameters() {
-    // 声明和获取参数
-    this->declare_parameter<std::string>("input_topic", "/livox/lidar");
-    this->declare_parameter<std::string>("output_topic", "/livox/lidar_filtered");
-    this->declare_parameter<std::string>("debug_topic", "/point_cloud_filter/debug_cloud");
-    this->declare_parameter<std::string>("stats_topic", "/point_cloud_filter/filter_stats");
-    
-    this->declare_parameter<bool>("debug_enabled", false);
-    this->declare_parameter<bool>("publish_stats", true);
-    this->declare_parameter<double>("max_processing_hz", 20.0);
+    filter_config_defaults_ = localizers::DynamicFilterConfig{};
+    BridgeParamDefaults defaults;
 
-    // 获取参数值
+    // 配置文件解析
+    this->declare_parameter<std::string>("filter_config_file", "");
+    filter_config_file_ = this->get_parameter("filter_config_file").as_string();
+    if (!filter_config_file_.empty()) {
+        const auto resolved = resolveConfigPath(filter_config_file_);
+        if (resolved.empty()) {
+            RCLCPP_WARN(this->get_logger(),
+                        "未找到过滤器配置文件: %s，使用内置默认值",
+                        filter_config_file_.c_str());
+        } else {
+            filter_config_file_ = resolved;
+            loadFilterDefaultsFromFile(filter_config_file_, defaults);
+        }
+    }
+
+    // 声明并获取基础参数（支持外部覆盖）
+    this->declare_parameter<std::string>("input_topic", defaults.input_topic);
+    this->declare_parameter<std::string>("output_topic", defaults.output_topic);
+    this->declare_parameter<std::string>("debug_topic", defaults.debug_topic);
+    this->declare_parameter<std::string>("stats_topic", defaults.stats_topic);
+    
+    this->declare_parameter<bool>("debug_enabled", defaults.debug_enabled);
+    this->declare_parameter<bool>("publish_stats", defaults.publish_stats);
+    this->declare_parameter<double>("max_processing_hz", defaults.max_processing_hz);
+    this->declare_parameter<double>("dynamic_filter.filter_ratio_warn", defaults.filter_ratio_warn);
+
     input_topic_ = this->get_parameter("input_topic").as_string();
     output_topic_ = this->get_parameter("output_topic").as_string();
     debug_topic_ = this->get_parameter("debug_topic").as_string();
     stats_topic_ = this->get_parameter("stats_topic").as_string();
-    
+
     debug_enabled_ = this->get_parameter("debug_enabled").as_bool();
     publish_stats_ = this->get_parameter("publish_stats").as_bool();
     max_processing_hz_ = this->get_parameter("max_processing_hz").as_double();
+    filter_ratio_warn_threshold_ = this->get_parameter("dynamic_filter.filter_ratio_warn").as_double();
 
     // 计算最小处理间隔
     if (max_processing_hz_ > 0.0) {
@@ -94,6 +117,13 @@ void PointCloudFilterBridge::initializeRosInterface() {
 
 bool PointCloudFilterBridge::initializeDynamicFilter() {
     try {
+        if (!dynamic_filter_enabled_) {
+            RCLCPP_WARN(this->get_logger(),
+                        "动态过滤器已禁用，桥接节点将直接透传点云（配置文件: %s）",
+                        filter_config_file_.empty() ? "默认内置" : filter_config_file_.c_str());
+            return true;
+        }
+
         // 加载过滤器配置
         filter_config_ = loadFilterConfig();
 
@@ -141,32 +171,34 @@ bool PointCloudFilterBridge::initializeDynamicFilter() {
 }
 
 localizers::DynamicFilterConfig PointCloudFilterBridge::loadFilterConfig() {
-    localizers::DynamicFilterConfig config;
+    localizers::DynamicFilterConfig config = filter_config_defaults_;
 
     // 声明并获取动态过滤器参数
-    this->declare_parameter<float>("dynamic_filter.motion_threshold", 0.05f);
-    this->declare_parameter<int>("dynamic_filter.history_size", 8);
-    this->declare_parameter<float>("dynamic_filter.stability_threshold", 0.75f);
-    this->declare_parameter<double>("dynamic_filter.max_time_diff", 1.0);
-    this->declare_parameter<float>("dynamic_filter.search_radius", 0.2f);
-    this->declare_parameter<int>("dynamic_filter.min_neighbors", 8);
-    this->declare_parameter<float>("dynamic_filter.normal_consistency_thresh", 0.8f);
-    this->declare_parameter<float>("dynamic_filter.density_ratio_thresh", 0.5f);
-    this->declare_parameter<int>("dynamic_filter.downsample_ratio", 1);
-    this->declare_parameter<int>("dynamic_filter.max_points_per_frame", 60000);
-    this->declare_parameter<float>("dynamic_filter.voxel_size_base", 0.01f);
+    this->declare_parameter<bool>("dynamic_filter.enable", dynamic_filter_enabled_);
+    this->declare_parameter<float>("dynamic_filter.motion_threshold", config.motion_threshold);
+    this->declare_parameter<int>("dynamic_filter.history_size", config.history_size);
+    this->declare_parameter<float>("dynamic_filter.stability_threshold", config.stability_threshold);
+    this->declare_parameter<double>("dynamic_filter.max_time_diff", config.max_time_diff);
+    this->declare_parameter<float>("dynamic_filter.search_radius", config.search_radius);
+    this->declare_parameter<int>("dynamic_filter.min_neighbors", config.min_neighbors);
+    this->declare_parameter<float>("dynamic_filter.normal_consistency_thresh", config.normal_consistency_thresh);
+    this->declare_parameter<float>("dynamic_filter.density_ratio_thresh", config.density_ratio_thresh);
+    this->declare_parameter<int>("dynamic_filter.downsample_ratio", config.downsample_ratio);
+    this->declare_parameter<int>("dynamic_filter.max_points_per_frame", config.max_points_per_frame);
+    this->declare_parameter<float>("dynamic_filter.voxel_size_base", config.voxel_size_base);
 
-    config.motion_threshold = this->get_parameter("dynamic_filter.motion_threshold").as_double();
+    dynamic_filter_enabled_ = this->get_parameter("dynamic_filter.enable").as_bool();
+    config.motion_threshold = static_cast<float>(this->get_parameter("dynamic_filter.motion_threshold").as_double());
     config.history_size = this->get_parameter("dynamic_filter.history_size").as_int();
-    config.stability_threshold = this->get_parameter("dynamic_filter.stability_threshold").as_double();
+    config.stability_threshold = static_cast<float>(this->get_parameter("dynamic_filter.stability_threshold").as_double());
     config.max_time_diff = this->get_parameter("dynamic_filter.max_time_diff").as_double();
-    config.search_radius = this->get_parameter("dynamic_filter.search_radius").as_double();
+    config.search_radius = static_cast<float>(this->get_parameter("dynamic_filter.search_radius").as_double());
     config.min_neighbors = this->get_parameter("dynamic_filter.min_neighbors").as_int();
-    config.normal_consistency_thresh = this->get_parameter("dynamic_filter.normal_consistency_thresh").as_double();
-    config.density_ratio_thresh = this->get_parameter("dynamic_filter.density_ratio_thresh").as_double();
+    config.normal_consistency_thresh = static_cast<float>(this->get_parameter("dynamic_filter.normal_consistency_thresh").as_double());
+    config.density_ratio_thresh = static_cast<float>(this->get_parameter("dynamic_filter.density_ratio_thresh").as_double());
     config.downsample_ratio = this->get_parameter("dynamic_filter.downsample_ratio").as_int();
     config.max_points_per_frame = this->get_parameter("dynamic_filter.max_points_per_frame").as_int();
-    config.voxel_size_base = this->get_parameter("dynamic_filter.voxel_size_base").as_double();
+    config.voxel_size_base = static_cast<float>(this->get_parameter("dynamic_filter.voxel_size_base").as_double());
 
     return config;
 }
@@ -209,16 +241,21 @@ void PointCloudFilterBridge::lidarCallback(const livox_ros_driver2::msg::CustomM
             input_kdtree_ready_ = false;
         }
 
-        // 步骤2: 应用动态过滤器
+        // 步骤2: 应用动态过滤器（可选）
         double timestamp = rclcpp::Time(msg->header.stamp).seconds();
-        RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 2000, "开始动态过滤处理...");
-        CloudType::Ptr filtered_cloud = dynamic_filter_->filterDynamicObjects(input_cloud, timestamp);
+        CloudType::Ptr filtered_cloud;
+        if (dynamic_filter_enabled_ && dynamic_filter_) {
+            RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 2000, "开始动态过滤处理...");
+            filtered_cloud = dynamic_filter_->filterDynamicObjects(input_cloud, timestamp);
 
-        if (!filtered_cloud) {
-            RCLCPP_ERROR(this->get_logger(), "动态过滤处理失败，返回空指针");
-            return;
+            if (!filtered_cloud) {
+                RCLCPP_ERROR(this->get_logger(), "动态过滤处理失败，返回空指针");
+                return;
+            }
+            RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 2000, "动态过滤完成，输出点数: %zu", filtered_cloud->size());
+        } else {
+            filtered_cloud = input_cloud;
         }
-        RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 2000, "动态过滤完成，输出点数: %zu", filtered_cloud->size());
 
         // 步骤3: 转换回CustomMsg格式
         auto filtered_msg = pclToCustomMsg(filtered_cloud, msg);
@@ -240,12 +277,22 @@ void PointCloudFilterBridge::lidarCallback(const livox_ros_driver2::msg::CustomM
 
         // 发布统计信息
         if (publish_stats_) {
-            auto stats = dynamic_filter_->getLastFilterStats();
+            localizers::FilterStats stats;
+            if (dynamic_filter_enabled_ && dynamic_filter_) {
+                stats = dynamic_filter_->getLastFilterStats();
+            } else {
+                stats.total_points = input_cloud->size();
+                stats.static_points = filtered_cloud->size();
+                stats.dynamic_points = stats.total_points - stats.static_points;
+                stats.processing_time_ms = processing_time_ms;
+                stats.history_frames = 1;
+                stats.updateFilterRatio();
+            }
             publishFilterStats(stats, msg->header);
         }
 
         // 发布调试点云
-        if (debug_enabled_) {
+        if (debug_enabled_ && dynamic_filter_enabled_) {
             publishDebugCloud(filtered_cloud, msg->header);
         }
 
@@ -410,6 +457,17 @@ void PointCloudFilterBridge::logPerformanceStats(
     size_t input_points, 
     size_t output_points) {
     
+    double filter_ratio = input_points > 0 ?
+        static_cast<double>(input_points - output_points) / static_cast<double>(input_points) : 0.0;
+
+    if (filter_ratio > filter_ratio_warn_threshold_) {
+        RCLCPP_WARN_THROTTLE(
+            this->get_logger(), *this->get_clock(), 2000,
+            "过滤比例 %.1f%% 超过告警阈值 %.1f%%，请检查动态滤波参数",
+            filter_ratio * 100.0,
+            filter_ratio_warn_threshold_ * 100.0);
+    }
+
     // 每100帧输出一次统计信息
     if (total_frames_processed_ % 100 == 0) {
         auto current_time = std::chrono::high_resolution_clock::now();
@@ -417,8 +475,6 @@ void PointCloudFilterBridge::logPerformanceStats(
             current_time - start_time_).count();
         
         double avg_fps = total_frames_processed_ / elapsed_seconds;
-        double filter_ratio = input_points > 0 ? 
-            static_cast<double>(input_points - output_points) / input_points : 0.0;
         
         RCLCPP_INFO(this->get_logger(),
             "性能统计 [第%zu帧]:\n"
@@ -433,6 +489,127 @@ void PointCloudFilterBridge::logPerformanceStats(
             output_points,
             filter_ratio * 100.0,
             avg_fps);
+    }
+}
+
+std::string PointCloudFilterBridge::resolveConfigPath(const std::string& path) const {
+    namespace fs = std::filesystem;
+    if (path.empty()) {
+        return "";
+    }
+
+    fs::path candidate(path);
+    if (candidate.is_absolute()) {
+        return fs::exists(candidate) ? candidate.lexically_normal().string() : "";
+    }
+
+    std::vector<fs::path> search_roots;
+    try {
+        search_roots.emplace_back(ament_index_cpp::get_package_share_directory("point_cloud_filter"));
+    } catch (const std::exception&) {
+    }
+    try {
+        search_roots.emplace_back(ament_index_cpp::get_package_share_directory("localizer"));
+    } catch (const std::exception&) {
+    }
+    search_roots.emplace_back(fs::current_path());
+
+    for (const auto& root : search_roots) {
+        fs::path resolved = root / candidate;
+        if (fs::exists(resolved)) {
+            return resolved.lexically_normal().string();
+        }
+    }
+    return "";
+}
+
+void PointCloudFilterBridge::loadFilterDefaultsFromFile(const std::string& resolved_path,
+                                                        BridgeParamDefaults& defaults) {
+    try {
+        YAML::Node root = YAML::LoadFile(resolved_path);
+
+        if (root["bridge"]) {
+            auto bridge = root["bridge"];
+            if (bridge["input_topic"]) {
+                defaults.input_topic = bridge["input_topic"].as<std::string>(defaults.input_topic);
+            }
+            if (bridge["output_topic"]) {
+                defaults.output_topic = bridge["output_topic"].as<std::string>(defaults.output_topic);
+            }
+            if (bridge["debug_topic"]) {
+                defaults.debug_topic = bridge["debug_topic"].as<std::string>(defaults.debug_topic);
+            }
+            if (bridge["stats_topic"]) {
+                defaults.stats_topic = bridge["stats_topic"].as<std::string>(defaults.stats_topic);
+            }
+            if (bridge["debug_enabled"]) {
+                defaults.debug_enabled = bridge["debug_enabled"].as<bool>(defaults.debug_enabled);
+            }
+            if (bridge["publish_stats"]) {
+                defaults.publish_stats = bridge["publish_stats"].as<bool>(defaults.publish_stats);
+            }
+            if (bridge["max_processing_hz"]) {
+                defaults.max_processing_hz = bridge["max_processing_hz"].as<double>(defaults.max_processing_hz);
+            }
+        }
+
+        if (root["dynamic_filter"]) {
+            auto df = root["dynamic_filter"];
+            if (df["enable"]) {
+                dynamic_filter_enabled_ = df["enable"].as<bool>(dynamic_filter_enabled_);
+            }
+            if (df["motion_threshold"]) {
+                filter_config_defaults_.motion_threshold = static_cast<float>(
+                    df["motion_threshold"].as<double>(filter_config_defaults_.motion_threshold));
+            }
+            if (df["history_size"]) {
+                filter_config_defaults_.history_size = df["history_size"].as<int>(filter_config_defaults_.history_size);
+            }
+            if (df["stability_threshold"]) {
+                filter_config_defaults_.stability_threshold = static_cast<float>(
+                    df["stability_threshold"].as<double>(filter_config_defaults_.stability_threshold));
+            }
+            if (df["max_time_diff"]) {
+                filter_config_defaults_.max_time_diff = df["max_time_diff"].as<double>(filter_config_defaults_.max_time_diff);
+            }
+            if (df["search_radius"]) {
+                filter_config_defaults_.search_radius = static_cast<float>(
+                    df["search_radius"].as<double>(filter_config_defaults_.search_radius));
+            }
+            if (df["min_neighbors"]) {
+                filter_config_defaults_.min_neighbors = df["min_neighbors"].as<int>(filter_config_defaults_.min_neighbors);
+            }
+            if (df["normal_consistency_thresh"]) {
+                filter_config_defaults_.normal_consistency_thresh = static_cast<float>(
+                    df["normal_consistency_thresh"].as<double>(filter_config_defaults_.normal_consistency_thresh));
+            }
+            if (df["density_ratio_thresh"]) {
+                filter_config_defaults_.density_ratio_thresh = static_cast<float>(
+                    df["density_ratio_thresh"].as<double>(filter_config_defaults_.density_ratio_thresh));
+            }
+            if (df["downsample_ratio"]) {
+                filter_config_defaults_.downsample_ratio = df["downsample_ratio"].as<int>(filter_config_defaults_.downsample_ratio);
+            }
+            if (df["max_points_per_frame"]) {
+                filter_config_defaults_.max_points_per_frame = df["max_points_per_frame"].as<int>(filter_config_defaults_.max_points_per_frame);
+            }
+            if (df["voxel_size_base"]) {
+                filter_config_defaults_.voxel_size_base = static_cast<float>(
+                    df["voxel_size_base"].as<double>(filter_config_defaults_.voxel_size_base));
+            }
+            if (df["filter_ratio_warn"]) {
+                defaults.filter_ratio_warn = df["filter_ratio_warn"].as<double>(defaults.filter_ratio_warn);
+            }
+        }
+
+        RCLCPP_INFO(this->get_logger(),
+                    "已从配置文件加载动态过滤器默认参数: %s",
+                    resolved_path.c_str());
+    } catch (const std::exception& e) {
+        RCLCPP_WARN(this->get_logger(),
+                    "加载过滤器配置文件失败(%s): %s",
+                    resolved_path.c_str(),
+                    e.what());
     }
 }
 

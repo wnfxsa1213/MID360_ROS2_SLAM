@@ -71,8 +71,11 @@ def generate_launch_description():
     driver_cfg = LAUNCH_CONFIG.get("lidar", {})
 
     # RViz配置
-    rviz_cfg = PathJoinSubstitution([
+    rviz_cfg_rt = PathJoinSubstitution([
         FindPackageShare("fastlio2"), "rviz", "enhanced_fastlio2.rviz"
+    ])
+    rviz_cfg_replay = PathJoinSubstitution([
+        FindPackageShare("fastlio2"), "rviz", "replay_fastlio2.rviz"
     ])
 
     return launch.LaunchDescription([
@@ -148,7 +151,7 @@ def generate_launch_description():
             remappings=[
                 ("/fastlio2/body_cloud", "/slam/body_cloud"),
                 ("/fastlio2/lio_odom", "/slam/lio_odom"),
-                ("/fastlio2/world_cloud", "/slam/world_cloud"),
+                ("/fastlio2/world_cloud_internal", "/slam/world_cloud"),
                 ("/fastlio2/lio_path", "/slam/lio_path"),
                 ("/fastlio2/performance_metrics", "/slam/performance_metrics"),
                 ("/fastlio2/diagnostics", "/slam/diagnostics")
@@ -166,7 +169,7 @@ def generate_launch_description():
             remappings=[
                 ("/fastlio2/body_cloud", "/slam/body_cloud"),
                 ("/fastlio2/lio_odom", "/slam/lio_odom"),
-                ("/fastlio2/world_cloud", "/slam/world_cloud"),
+                ("/fastlio2/world_cloud_internal", "/slam/world_cloud"),
                 ("/fastlio2/lio_path", "/slam/lio_path"),
                 ("/fastlio2/performance_metrics", "/slam/performance_metrics"),
                 ("/fastlio2/diagnostics", "/slam/diagnostics")
@@ -283,9 +286,16 @@ def generate_launch_description():
         launch_ros.actions.Node(
             package="tf2_ros",
             executable="static_transform_publisher",
-            name="map_to_odom_broadcaster",
+            name="map_to_odom_broadcaster_rt",
             arguments=["0", "0", "0", "0", "0", "0", "map", "odom"],
             condition=UnlessCondition(use_bag)
+        ),
+        launch_ros.actions.Node(
+            package="tf2_ros",
+            executable="static_transform_publisher",
+            name="map_to_odom_broadcaster_bag",
+            arguments=["0", "0", "0", "0", "0", "0", "map", "odom"],
+            condition=IfCondition(use_bag)
         ),
 
         # Base Link (IMU) to Livox Frame (LiDAR) 变换发布器
@@ -294,9 +304,16 @@ def generate_launch_description():
         launch_ros.actions.Node(
             package="tf2_ros",
             executable="static_transform_publisher",
-            name="base_link_to_livox_frame_broadcaster",
+            name="base_link_to_livox_frame_broadcaster_rt",
             arguments=["-0.011", "-0.02329", "0.04412", "0", "0", "0", "base_link", "livox_frame"],
             condition=UnlessCondition(use_bag)
+        ),
+        launch_ros.actions.Node(
+            package="tf2_ros",
+            executable="static_transform_publisher",
+            name="base_link_to_livox_frame_broadcaster_bag",
+            arguments=["-0.011", "-0.02329", "0.04412", "0", "0", "0", "base_link", "livox_frame"],
+            condition=IfCondition(use_bag)
         ),
 
         # === 增强可视化系统 ===
@@ -305,10 +322,22 @@ def generate_launch_description():
             executable="rviz2",
             name="rviz2",
             output="screen",
-            arguments=["-d", rviz_cfg],
+            arguments=["-d", rviz_cfg_rt],
             parameters=[{
                 'use_sim_time': use_sim_time
-            }]
+            }],
+            condition=UnlessCondition(use_bag)
+        ),
+        launch_ros.actions.Node(
+            package="rviz2",
+            executable="rviz2",
+            name="rviz2_replay",
+            output="screen",
+            arguments=["-d", rviz_cfg_replay],
+            parameters=[{
+                'use_sim_time': use_sim_time
+            }],
+            condition=IfCondition(use_bag)
         ),
 
         # === Bag回放（可选）===
@@ -316,6 +345,7 @@ def generate_launch_description():
             cmd=[
                 'ros2', 'bag', 'play', bag_path,
                 '--rate', bag_rate,
+                '--clock', '200',
             ] + (['--loop'] if str(bag_loop) == 'true' else []),
             shell=False,
             output='screen',

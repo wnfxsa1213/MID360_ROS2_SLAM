@@ -89,6 +89,10 @@ private:
     
     /// 过滤器配置
     localizers::DynamicFilterConfig filter_config_;
+    localizers::DynamicFilterConfig filter_config_defaults_;
+    bool dynamic_filter_enabled_{true};
+    double filter_ratio_warn_threshold_{0.35};
+    std::string filter_config_file_;
 
     // ================ 性能统计 ================
     
@@ -204,9 +208,27 @@ private:
      * @param input_points 输入点数
      * @param output_points 输出点数
      */
-    void logPerformanceStats(double processing_time_ms, 
-                            size_t input_points, 
-                            size_t output_points);
+    void logPerformanceStats(double processing_time_ms,
+                             size_t input_points,
+                             size_t output_points);
+
+    /// 解析配置文件路径
+    std::string resolveConfigPath(const std::string& path) const;
+
+    struct BridgeParamDefaults {
+        std::string input_topic{"/livox/lidar"};
+        std::string output_topic{"/livox/lidar_filtered"};
+        std::string debug_topic{"/point_cloud_filter/debug_cloud"};
+        std::string stats_topic{"/point_cloud_filter/filter_stats"};
+        bool debug_enabled{false};
+        bool publish_stats{true};
+        double max_processing_hz{20.0};
+        double filter_ratio_warn{0.35};
+    };
+
+    /// 从外部配置文件加载过滤器默认参数
+    void loadFilterDefaultsFromFile(const std::string& resolved_path,
+                                    BridgeParamDefaults& defaults);
 };
 
 } // namespace point_cloud_filter

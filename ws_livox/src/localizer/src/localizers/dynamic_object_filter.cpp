@@ -10,6 +10,7 @@
 #include <cmath>
 #include <iomanip>
 #include <sstream>
+#include <rclcpp/rclcpp.hpp>
 
 namespace localizers {
 
@@ -154,10 +155,14 @@ CloudType::Ptr DynamicObjectFilter::filterDynamicObjects(const CloudType::Ptr& i
         return filtered_cloud;
         
     } catch (const std::exception& e) {
+        std::string err_msg = "过滤过程中出现异常: " + std::string(e.what());
         if (debug_mode_) {
-            debugLog("过滤过程中出现异常: " + std::string(e.what()));
+            debugLog(err_msg);
+        } else {
+            RCLCPP_WARN_STREAM(rclcpp::get_logger("dynamic_object_filter"), err_msg);
         }
-        return std::make_shared<CloudType>();
+        // 降级策略：返回原始点云，避免直接丢帧导致稀疏地图
+        return input_cloud;
     }
 }
 

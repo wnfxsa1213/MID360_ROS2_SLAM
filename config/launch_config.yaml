@@ -43,6 +43,7 @@ rosbag:
   - /slam/lio_odom
   - /slam/lio_path
   - /slam/body_cloud
+  - /slam/world_cloud
   - /tf
   - /tf_static
 rviz:

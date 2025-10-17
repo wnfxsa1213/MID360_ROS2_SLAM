@@ -78,8 +78,10 @@ def main():
         topics = args.topics or rosbag_config.get('topics', [
             '/livox/lidar',
             '/livox/imu',
-            '/fastlio2/lio_odom',
-            '/fastlio2/path'
+            '/slam/lio_odom',
+            '/slam/lio_path',
+            '/slam/body_cloud',
+            '/slam/world_cloud'
         ])
         cmd.extend(topics)
         topics_str = ', '.join(topics)

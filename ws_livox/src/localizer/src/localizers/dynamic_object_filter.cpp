@@ -881,6 +881,8 @@ void DynamicObjectFilter::debugLog(const std::string& message) const {
 pcl::KdTreeFLANN<PointType>::Ptr DynamicObjectFilter::getOrCreateHistoryKdTree(
     const CloudType::Ptr& cloud) const
 {
+    FilterLockGuard lock(mutex_);
+
     if (!cloud || cloud->empty()) {
         return nullptr;
     }
@@ -906,6 +908,8 @@ pcl::KdTreeFLANN<PointType>::Ptr DynamicObjectFilter::getOrCreateHistoryKdTree(
 
 void DynamicObjectFilter::pruneHistoryKdTreeCache() const
 {
+    FilterLockGuard lock(mutex_);
+
     if (history_kdtree_cache_.empty()) {
         return;
     }

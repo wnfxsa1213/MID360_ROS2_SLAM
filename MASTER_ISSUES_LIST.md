@@ -392,7 +392,7 @@ watch -n 60 'ps -p $(pgrep pgo_node) -o pid,rss,vsz,cmd'
 
 ---
 
-#### ❌ #5 HBA Hessian矩阵奇异性检查缺失
+#### ✅ #5 HBA Hessian矩阵奇异性检查缺失 *(2025-10-18 已修复)*
 **位置**: [blam.cpp:363](ws_livox/src/hba/src/hba/blam.cpp#L363)
 **发现时间**: 后端优化模块审查
 **影响**: 🔴 **退化场景崩溃风险**
@@ -412,37 +412,14 @@ Eigen::VectorXd delta = Hess.colPivHouseholderQr().solve(-m_J);
 - 位姿更新失败
 - 系统状态破坏
 
-**修复方案** (4小时):
-```cpp
-Eigen::MatrixXd Hess = m_H + u * D;
+**状态更新 (2025-10-18)**:
+- ws_livox/src/hba/src/hba/blam.cpp: 在 LM 更新中加入 Hessian 条件数检测，阈值 1e12；若过大则跳过本轮并调整阻尼；若解向量含 NaN/Inf 立即中止优化。
+- 日志通过 `std::cerr` 输出 `[HBA][WARN]/[ERROR]`，避免额外依赖。
+- 重新编译 `colcon build --packages-select hba --symlink-install`，通过无误。
+- 建议回放退化场景测试（窄走廊/平地），确认优化能平稳退避。
 
-// 1. 检查条件数
-Eigen::JacobiSVD<Eigen::MatrixXd> svd(Hess);
-double cond = svd.singularValues()(0) /
-              svd.singularValues()(svd.singularValues().size()-1);
-
-if (cond > 1e10 || std::isnan(cond)) {
-    RCLCPP_WARN(/* logger */, "Hessian近似奇异(条件数=%.2e),跳过优化", cond);
-    break;
-}
-
-Eigen::VectorXd delta = Hess.colPivHouseholderQr().solve(-m_J);
-
-// 2. 检查求解结果
-if (!delta.allFinite()) {
-    RCLCPP_ERROR(/* logger */, "优化求解失败,回退至初始位姿");
-    m_poses = initial_poses_backup;
-    break;
-}
-
-// 3. 检查步长合理性
-if (delta.norm() > 10.0) {
-    delta = delta.normalized() * 10.0;
-}
-```
-
-**工作量**: ⏱️ 4小时
-**优先级**: 🔴 **高**
+**工作量**: ⏱️ 4小时（已完成）
+**优先级**: 🔴 **已修复**
 
 ---
 

@@ -360,7 +360,29 @@ void BLAM::optimize()
         }
         D = m_H.diagonal().asDiagonal();
         Eigen::MatrixXd Hess = m_H + u * D;
+
+        Eigen::JacobiSVD<Eigen::MatrixXd> svd(Hess);
+        const auto& singular_values = svd.singularValues();
+        double cond_num = std::numeric_limits<double>::infinity();
+        if (singular_values.size() > 0 && singular_values.minCoeff() > 0.0) {
+            cond_num = singular_values.maxCoeff() / singular_values.minCoeff();
+        }
+
+        if (!std::isfinite(cond_num) || cond_num > 1e12) {
+            std::cerr << "[HBA][WARN] Hessian condition number too large: " << cond_num
+                      << ", skip update" << std::endl;
+            u *= v;
+            v *= 2;
+            build_hess = false;
+            continue;
+        }
+
         Eigen::VectorXd delta = Hess.colPivHouseholderQr().solve(-m_J);
+        if (!delta.allFinite()) {
+            std::cerr << "[HBA][ERROR] Hessian solve returned non-finite delta, abort optimization"
+                      << std::endl;
+            break;
+        }
         Vec<Pose> temp_pose(m_poses.begin(), m_poses.end());
         plusDelta(temp_pose, delta);
         double residual_new = evalPlanesByPoses(temp_pose);

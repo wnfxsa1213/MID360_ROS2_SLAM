@@ -406,18 +406,20 @@ public:
         pose.pose.orientation.z = q.z();
         pose.pose.orientation.w = q.w();
 
-        // 使用锁保护路径数据的并发访问
+        nav_msgs::msg::Path path_copy;
         {
             std::lock_guard<std::mutex> lock(m_state_data.path_mutex);
+            m_state_data.path.header.frame_id = frame_id;
+            m_state_data.path.header.stamp = Utils::getTime(time);
             m_state_data.path.poses.push_back(pose);
             if (m_state_data.path.poses.size() > kMaxPathSize) {
                 auto erase_begin = m_state_data.path.poses.begin();
                 auto erase_end = erase_begin + (m_state_data.path.poses.size() - kMaxPathSize);
                 m_state_data.path.poses.erase(erase_begin, erase_end);
             }
-            m_state_data.path.header.stamp = Utils::getTime(time);
-            path_pub->publish(m_state_data.path);
+            path_copy = m_state_data.path;
         }
+        path_pub->publish(path_copy);
     }
 
     void publishIMUPose(rclcpp::Publisher<visualization_msgs::msg::Marker>::SharedPtr marker_pub, std::string frame_id, const double &time)

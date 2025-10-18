@@ -620,7 +620,7 @@ calculateMemoryUsage(); // line 816 (若将来需要mutex_)
 
 ### 🚨 FAST-LIO2数据竞态
 
-#### ❌ #8 Path发布存在数据竞态
+#### ✅ #8 Path发布存在数据竞态 *(2025-10-18 已修复)*
 **位置**: [lio_node.cpp:399-410](ws_livox/src/fastlio2/src/lio_node.cpp#L399-L410)
 **发现时间**: 前次审查
 **影响**: 🔴 **数据损坏**
@@ -630,18 +630,13 @@ m_state_data.path.poses.push_back(pose); // 无锁修改
 m_path_pub->publish(m_state_data.path);  // 同时读取
 ```
 
-**修复方案** (1小时):
-```cpp
-nav_msgs::msg::Path path_copy;
-{
-    std::lock_guard<std::mutex> lock(m_state_data.path_mutex);
-    path_copy = m_state_data.path;
-}
-m_path_pub->publish(path_copy);
-```
+**状态更新 (2025-10-18)**:
+- ws_livox/src/fastlio2/src/lio_node.cpp: `publishPath` 现在在持锁状态下更新 `m_state_data.path`，随后复制到局部变量 `path_copy` 并在锁外发布，避免发布期间的竞态。
+- 同时补写 `header.frame_id`，确保复制数据一致。
+- `colcon build --packages-select fastlio2 --symlink-install` 通过验证。
 
-**工作量**: ⏱️ 1小时
-**优先级**: 🔴 **中高**
+**工作量**: ⏱️ 1小时（已完成）
+**优先级**: 🔴 **已修复**
 
 ---
 

@@ -487,7 +487,7 @@ ros2 topic echo /hba/status
 
 ---
 
-#### ❌ #6 HBA除零漏洞 - 特征值差接近零
+#### ✅ #6 HBA除零漏洞 - 特征值差接近零 *(2025-10-18 已修复)*
 **位置**: [blam.cpp:220-221](ws_livox/src/hba/src/hba/blam.cpp#L220-L221)
 **发现时间**: 后端优化模块审查
 **影响**: 🔴 **数值不稳定/Inf传播**
@@ -497,29 +497,14 @@ ret.row(1) = ... / (m_eigen_val(0) - m_eigen_val(1)); // ❌ 可能为0!
 ret.row(2) = ... / (m_eigen_val(0) - m_eigen_val(2));
 ```
 
-**修复方案** (2小时):
-```cpp
-M3D OctoTree::fp(const V3D &p)
-{
-    M3D ret = M3D::Zero();
-    const double eps = 1e-6;
+**状态更新 (2025-10-18)**:
+- ws_livox/src/hba/src/hba/blam.cpp: `OctoTree::fp` 现在在分母前检查特征值差，阈值 1e-8；若差值极小直接跳过对应项，避免除零/爆 NaN。  
+- 同时补上 row(0) 赋值并防御 `m_points.size()==0`。  
+- `colcon build --packages-select hba --symlink-install` 再次通过。  
+- 建议在退化点云回放时观察 `[HBA][WARN]/[ERROR]`，确保无新的算子溢出。
 
-    double gap01 = std::abs(m_eigen_val(0) - m_eigen_val(1));
-    if (gap01 > eps) {
-        ret.row(1) = ... / gap01;
-    }
-
-    double gap02 = std::abs(m_eigen_val(0) - m_eigen_val(2));
-    if (gap02 > eps) {
-        ret.row(2) = ... / gap02;
-    }
-
-    return ret;
-}
-```
-
-**工作量**: ⏱️ 2小时
-**优先级**: 🔴 **高**
+**工作量**: ⏱️ 2小时（已完成）
+**优先级**: 🔴 **已修复**
 
 ---
 

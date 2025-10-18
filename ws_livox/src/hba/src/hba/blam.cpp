@@ -217,8 +217,34 @@ double OctoTree::evalByPose(const Vec<Pose> &poses)
 M3D OctoTree::fp(const V3D &p)
 {
     M3D ret = M3D::Zero();
-    ret.row(1) = (p - m_mean).transpose() * (m_eigen_vec.col(1) * m_eigen_vec.col(0).transpose() + m_eigen_vec.col(0) * m_eigen_vec.col(1).transpose()) / static_cast<double>(m_points.size()) / (m_eigen_val(0) - m_eigen_val(1));
-    ret.row(2) = (p - m_mean).transpose() * (m_eigen_vec.col(2) * m_eigen_vec.col(0).transpose() + m_eigen_vec.col(0) * m_eigen_vec.col(2).transpose()) / static_cast<double>(m_points.size()) / (m_eigen_val(0) - m_eigen_val(2));
+    double denom = static_cast<double>(m_points.size());
+    if (denom <= 0.0)
+    {
+        return ret;
+    }
+
+    ret.row(0) = (p - m_mean).transpose() *
+        (m_eigen_vec.col(0) * m_eigen_vec.col(0).transpose()) / denom;
+
+    const double eps = 1e-8;
+    double gap01 = std::abs(m_eigen_val(0) - m_eigen_val(1));
+    if (gap01 > eps)
+    {
+        ret.row(1) = (p - m_mean).transpose() *
+            (m_eigen_vec.col(1) * m_eigen_vec.col(0).transpose() +
+             m_eigen_vec.col(0) * m_eigen_vec.col(1).transpose()) /
+            denom / gap01;
+    }
+
+    double gap02 = std::abs(m_eigen_val(0) - m_eigen_val(2));
+    if (gap02 > eps)
+    {
+        ret.row(2) = (p - m_mean).transpose() *
+            (m_eigen_vec.col(2) * m_eigen_vec.col(0).transpose() +
+             m_eigen_vec.col(0) * m_eigen_vec.col(2).transpose()) /
+            denom / gap02;
+    }
+
     return ret;
 }
 V3D OctoTree::dp(const V3D &p)

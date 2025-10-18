@@ -172,3 +172,11 @@ void HBA::writePoses(const std::string &path)
     }
     txt_file.close();
 }
+
+void HBA::reset()
+{
+    Vec<Pose>().swap(m_poses);
+    Vec<pcl::PointCloud<pcl::PointXYZI>::Ptr>().swap(m_clouds);
+    Vec<Vec<BLAM>>().swap(m_lbas);
+    m_levels = 1;
+}

@@ -1,6 +1,7 @@
 #include <rclcpp/rclcpp.hpp>
 #include <nav_msgs/msg/odometry.hpp>
 #include <geometry_msgs/msg/pose_array.hpp>
+#include <geometry_msgs/msg/pose_with_covariance.hpp>
 #include <std_msgs/msg/float64_multi_array.hpp>
 #include "interface/srv/update_pose.hpp"
 #include "interface/srv/sync_state.hpp"
@@ -12,6 +13,7 @@
 #include <queue>
 #include <mutex>
 #include <thread>
+#include <vector>
 
 using namespace std::chrono_literals;
 
@@ -338,7 +340,24 @@ private:
             auto response = future.get();
 
             if (response->success) {
-                RCLCPP_INFO(this->get_logger(), "✅ HBA优化完成");
+                RCLCPP_INFO(this->get_logger(),
+                            "✅ HBA优化完成，迭代:%d，残差:%.6f",
+                            response->iterations_used,
+                            response->final_residual);
+
+                if (!response->optimized_poses.poses.empty()) {
+                    auto pose_with_cov = extractPoseWithCovariance(
+                        response->optimized_poses,
+                        response->pose_covariances,
+                        response->optimized_poses.poses.size() - 1);
+
+                    double score = evaluateHBAScore(response->final_residual);
+                    pushUpdatePoseToLIO(pose_with_cov, score, "hba_node");
+                    pushSyncStateToLIO("hba_node", 1, response->optimized_poses);
+                } else {
+                    RCLCPP_WARN(this->get_logger(), "HBA返回的pose数组为空，跳过反馈");
+                }
+
                 m_metrics.successful_optimizations++;
                 requestStateSync("hba_node", 1);
             } else {
@@ -563,6 +582,31 @@ private:
             "📊 协调器状态 - 漂移:%.3fm, 成功:%d, 失败:%d, 队列:%lu",
             m_metrics.cumulative_drift, m_metrics.successful_optimizations,
             m_metrics.failed_optimizations, m_task_queue.size());
+    }
+
+    geometry_msgs::msg::PoseWithCovariance extractPoseWithCovariance(
+        const geometry_msgs::msg::PoseArray& poses,
+        const std::vector<double>& covariances,
+        size_t index) const
+    {
+        geometry_msgs::msg::PoseWithCovariance result;
+        if (poses.poses.size() <= index) {
+            return result;
+        }
+        result.pose = poses.poses[index];
+        std::fill(result.covariance.begin(), result.covariance.end(), 0.0);
+
+        const size_t offset = index * 36;
+        if (covariances.size() >= offset + 36) {
+            std::copy_n(covariances.begin() + offset, 36, result.covariance.begin());
+        }
+        return result;
+    }
+
+    double evaluateHBAScore(double residual) const
+    {
+        double clamped = std::max(0.0, std::min(residual, 10.0));
+        return 1.0 / (1.0 + clamped);
     }
 };
 

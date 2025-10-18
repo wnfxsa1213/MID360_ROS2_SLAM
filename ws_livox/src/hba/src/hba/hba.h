@@ -48,6 +48,8 @@ public:
 
     void writePoses(const std::string &path);
 
+    void reset();
+
 private:
     int m_levels = 1;
     HBAConfig m_config;

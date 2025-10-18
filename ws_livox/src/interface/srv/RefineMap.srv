@@ -2,3 +2,7 @@ string maps_path
 ---
 bool success
 string message
+geometry_msgs/PoseArray optimized_poses
+float64[] pose_covariances
+int32 iterations_used
+float64 final_residual

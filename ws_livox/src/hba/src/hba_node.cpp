@@ -1,4 +1,5 @@
 #include <iostream>
+#include <string>
 #include <rclcpp/rclcpp.hpp>
 #include <yaml-cpp/yaml.h>
 #include "hba/hba.h"
@@ -6,8 +7,14 @@
 #include <filesystem>
 #include <pcl/io/pcd_io.h>
 #include <chrono>
+#include <vector>
+#include <algorithm>
+#include <cmath>
+#include <Eigen/Geometry>
 #include <sensor_msgs/msg/point_cloud2.hpp>
 #include <pcl_conversions/pcl_conversions.h>
+
+#include <geometry_msgs/msg/pose_array.hpp>
 
 #include "interface/srv/refine_map.hpp"
 #include "interface/srv/save_poses.hpp"
@@ -48,7 +55,6 @@ public:
         m_save_poses_srv = this->create_service<interface::srv::SavePoses>(
             "hba/save_poses",
             std::bind(&HBANode::savePosesCB, this, std::placeholders::_1, std::placeholders::_2));
-        m_timer = this->create_wall_timer(100ms, std::bind(&HBANode::mainCB, this));
         m_cloud_pub = this->create_publisher<sensor_msgs::msg::PointCloud2>("hba/map_points", 10);
     }
 
@@ -77,60 +83,108 @@ public:
         m_hba_config.down_sample = config["down_sample"].as<double>();
     }
 
-    void refineMapCB(const std::shared_ptr<interface::srv::RefineMap::Request> request, std::shared_ptr<interface::srv::RefineMap::Response> response)
+    void refineMapCB(const std::shared_ptr<interface::srv::RefineMap::Request> request,
+                     std::shared_ptr<interface::srv::RefineMap::Response> response)
     {
         std::lock_guard<std::mutex> lock(m_service_mutex);
-        if (!std::filesystem::exists(request->maps_path))
-        {
-            response->success = false;
-            response->message = "maps_path not exists";
-            return;
-        }
-
-        std::filesystem::path p_dir(request->maps_path);
-        std::filesystem::path pcd_dir = p_dir / "patches";
-        if (!std::filesystem::exists(pcd_dir))
-        {
-            response->success = false;
-            response->message = pcd_dir.string() + " not exists";
-            return;
-        }
-
-        std::filesystem::path txt_file = p_dir / "poses.txt";
-
-        if (!std::filesystem::exists(txt_file))
-        {
-            response->success = false;
-            response->message = txt_file.string() + " not exists";
-            return;
-        }
-
-        std::ifstream ifs(txt_file);
-        std::string line;
-        std::string file_name;
-        Pose pose;
-        pcl::PCDReader reader;
-        while (std::getline(ifs, line))
-        {
-
-            fromStr(line, file_name, pose);
-            std::filesystem::path pcd_file = p_dir / "patches" / file_name;
-            if (!std::filesystem::exists(pcd_file))
-            {
-                std::cerr << "pcd file not found" << std::endl;
-                continue;
+        try {
+            if (!std::filesystem::exists(request->maps_path)) {
+                response->success = false;
+                response->message = "maps_path not exists";
+                return;
             }
-            pcl::PointCloud<pcl::PointXYZI>::Ptr cloud(new pcl::PointCloud<pcl::PointXYZI>);
-            reader.read(pcd_file, *cloud);
-            m_voxel_grid.setInputCloud(cloud);
-            m_voxel_grid.filter(*cloud);
-            m_hba->insert(cloud, pose);
+
+            std::filesystem::path p_dir(request->maps_path);
+            std::filesystem::path pcd_dir = p_dir / "patches";
+            if (!std::filesystem::exists(pcd_dir)) {
+                response->success = false;
+                response->message = pcd_dir.string() + " not exists";
+                return;
+            }
+
+            std::filesystem::path txt_file = p_dir / "poses.txt";
+            if (!std::filesystem::exists(txt_file)) {
+                response->success = false;
+                response->message = txt_file.string() + " not exists";
+                return;
+            }
+
+            // 清理旧数据，重新加载
+            m_hba->reset();
+
+            std::ifstream ifs(txt_file);
+            std::string line;
+            std::string file_name;
+            Pose pose;
+            pcl::PCDReader reader;
+
+            while (std::getline(ifs, line)) {
+                if (line.empty()) {
+                    continue;
+                }
+                fromStr(line, file_name, pose);
+                std::filesystem::path pcd_file = p_dir / "patches" / file_name;
+                if (!std::filesystem::exists(pcd_file)) {
+                    RCLCPP_WARN(this->get_logger(), "pcd file not found: %s", pcd_file.c_str());
+                    continue;
+                }
+
+                pcl::PointCloud<pcl::PointXYZI>::Ptr cloud(new pcl::PointCloud<pcl::PointXYZI>);
+                if (reader.read(pcd_file.string(), *cloud) != 0) {
+                    RCLCPP_WARN(this->get_logger(), "failed to read pcd: %s", pcd_file.c_str());
+                    continue;
+                }
+                m_voxel_grid.setInputCloud(cloud);
+                m_voxel_grid.filter(*cloud);
+                m_hba->insert(cloud, pose);
+            }
+
+            if (m_hba->poses().empty()) {
+                response->success = false;
+                response->message = "poses.txt loaded no valid entries";
+                return;
+            }
+
+            RCLCPP_INFO(this->get_logger(), "LOAD POSE %lu;", m_hba->poses().size());
+
+            Vec<Pose> initial_poses = m_hba->poses();
+            int iterations_used = 0;
+            std::vector<double> translation_errors;
+            std::vector<double> rotation_errors;
+
+            auto start_time = std::chrono::steady_clock::now();
+            for (size_t iter = 0; iter < m_hba_config.hba_iter; ++iter) {
+                RCLCPP_INFO(this->get_logger(), "======HBA ITER %lu START======", iter + 1);
+                m_hba->optimize();
+                iterations_used++;
+                RCLCPP_INFO(this->get_logger(), "======HBA ITER %lu END========", iter + 1);
+            }
+            auto end_time = std::chrono::steady_clock::now();
+
+            double final_residual = computePoseResiduals(initial_poses,
+                                                         m_hba->poses(),
+                                                         translation_errors,
+                                                         rotation_errors);
+
+            geometry_msgs::msg::PoseArray optimized_array = buildPoseArray(m_hba->poses());
+            response->optimized_poses = optimized_array;
+            response->pose_covariances = buildPoseCovariances(translation_errors, rotation_errors);
+            response->iterations_used = iterations_used;
+            response->final_residual = final_residual;
+            response->success = true;
+            response->message = "HBA optimization completed";
+
+            RCLCPP_INFO(this->get_logger(),
+                        "HBA optimization finished in %.2fs, residual: %.6f",
+                        std::chrono::duration<double>(end_time - start_time).count(),
+                        final_residual);
+
+            publishMap();
+        } catch (const std::exception& e) {
+            response->success = false;
+            response->message = std::string("HBA optimization exception: ") + e.what();
+            RCLCPP_ERROR(this->get_logger(), "HBA optimization exception: %s", e.what());
         }
-        RCLCPP_INFO(this->get_logger(), "LOAD POSE %lu;", m_hba->poses().size());
-        response->success = true;
-        response->message = "load poses success!";
-        m_do_optimize = true;
-        return;
     }
 
     void savePosesCB(const std::shared_ptr<interface::srv::SavePoses::Request> request, std::shared_ptr<interface::srv::SavePoses::Response> response)
@@ -161,25 +215,87 @@ public:
         response->message = "save poses success!";
         return;
     }
-    void mainCB()
-    {
-        {
-            std::lock_guard<std::mutex> lock(m_service_mutex);
-            if (!m_do_optimize)
-                return;
-            RCLCPP_WARN(this->get_logger(), "START OPTIMIZE");
-            publishMap();
-            for (size_t i = 0; i < m_hba_config.hba_iter; i++)
-            {
-                RCLCPP_INFO(this->get_logger(), "======HBA ITER %lu START======", i + 1);
-                m_hba->optimize();
-                publishMap();
-                RCLCPP_INFO(this->get_logger(), "======HBA ITER %lu END========", i + 1);
-            }
 
-            m_do_optimize = false;
-            RCLCPP_WARN(this->get_logger(), "END OPTIMIZE");
+    geometry_msgs::msg::PoseArray buildPoseArray(const Vec<Pose> &poses)
+    {
+        geometry_msgs::msg::PoseArray pose_array;
+        pose_array.header.frame_id = "map";
+        pose_array.header.stamp = this->now();
+        pose_array.poses.reserve(poses.size());
+        for (const auto &pose : poses) {
+            pose_array.poses.push_back(toGeometryPose(pose));
         }
+        return pose_array;
+    }
+
+    geometry_msgs::msg::Pose toGeometryPose(const Pose &pose) const
+    {
+        geometry_msgs::msg::Pose ros_pose;
+        ros_pose.position.x = pose.t.x();
+        ros_pose.position.y = pose.t.y();
+        ros_pose.position.z = pose.t.z();
+
+        Eigen::Quaterniond q(pose.r);
+        ros_pose.orientation.w = q.w();
+        ros_pose.orientation.x = q.x();
+        ros_pose.orientation.y = q.y();
+        ros_pose.orientation.z = q.z();
+        return ros_pose;
+    }
+
+    std::vector<double> buildPoseCovariances(const std::vector<double> &translation_errors,
+                                             const std::vector<double> &rotation_errors) const
+    {
+        size_t n = std::min(translation_errors.size(), rotation_errors.size());
+        std::vector<double> covariances;
+        covariances.reserve(n * 36);
+
+        for (size_t i = 0; i < n; ++i) {
+            double trans_var = std::max(translation_errors[i] * translation_errors[i], 1e-8);
+            double rot_var = std::max(rotation_errors[i] * rotation_errors[i], 1e-8);
+
+            for (int row = 0; row < 6; ++row) {
+                for (int col = 0; col < 6; ++col) {
+                    double value = 0.0;
+                    if (row == col) {
+                        value = (row < 3) ? trans_var : rot_var;
+                    }
+                    covariances.push_back(value);
+                }
+            }
+        }
+        return covariances;
+    }
+
+    double computePoseResiduals(const Vec<Pose> &baseline,
+                                const Vec<Pose> &optimized,
+                                std::vector<double> &translation_errors,
+                                std::vector<double> &rotation_errors) const
+    {
+        size_t n = std::min(baseline.size(), optimized.size());
+        translation_errors.assign(n, 0.0);
+        rotation_errors.assign(n, 0.0);
+
+        if (n == 0) {
+            return 0.0;
+        }
+
+        double accum = 0.0;
+        for (size_t i = 0; i < n; ++i) {
+            V3D delta_t = optimized[i].t - baseline[i].t;
+            double trans_err = delta_t.norm();
+
+            Eigen::Quaterniond q_base(baseline[i].r);
+            Eigen::Quaterniond q_opt(optimized[i].r);
+            double rot_err = q_base.angularDistance(q_opt);
+
+            translation_errors[i] = trans_err;
+            rotation_errors[i] = rot_err;
+
+            accum += trans_err * trans_err + rot_err * rot_err;
+        }
+
+        return std::sqrt(accum / static_cast<double>(n));
     }
 
     void publishMap()
@@ -209,8 +325,6 @@ private:
 
     pcl::VoxelGrid<pcl::PointXYZI> m_voxel_grid;
     std::mutex m_service_mutex;
-    bool m_do_optimize = false;
-    rclcpp::TimerBase::SharedPtr m_timer;
 };
 
 int main(int argc, char **argv)

@@ -93,7 +93,7 @@ ros2 topic echo /fastlio2/cooperation_status
 
 ---
 
-#### ❌ #2 HBA无数据输出接口,完全孤立
+#### ✅ #2 HBA无数据输出接口,完全孤立 *(2025-10-18 已修复)*
 **位置**: [hba_node.cpp:130-134](ws_livox/src/hba/src/hba_node.cpp#L130-L134)
 **发现时间**: 协同机制分析
 **影响**: 🔴 **模块完全无法协同**
@@ -179,6 +179,13 @@ void executeHBAOptimization(...)
     }
 }
 ```
+
+**状态更新 (2025-10-18)**:
+- ws_livox/src/interface/srv/RefineMap.srv: 响应扩展为携带优化轨迹、协方差、迭代次数与最终残差。
+- ws_livox/src/hba/src/hba_node.cpp: 服务内部同步执行 HBA，计算残差、构造 `PoseArray` 和协方差矩阵，并在成功后直接发布优化后的地图点云。
+- ws_livox/src/hba/src/hba/hba.{h,cpp}: 新增 `reset()`，避免多次请求叠加旧帧导致数据脏。
+- ws_livox/src/cooperation/src/optimization_coordinator.cpp: 接入 HBA 新响应，将最终位姿（含协方差）反馈给 FAST-LIO2，同时用全轨迹同步协同状态。
+- 已执行 `colcon build --packages-select interface hba cooperation --symlink-install`，编译通过确认链路有效。
 
 **工作量**: ⏱️ 3小时
 **优先级**: 🔴 **最高优先级**

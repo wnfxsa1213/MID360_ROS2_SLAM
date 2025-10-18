@@ -321,7 +321,7 @@ void KD_TREE<PointType>::multi_thread_rebuild()
             }
             else
             {
-                throw "Error: Father ptr incompatible with current node\n";
+                throw std::runtime_error("ikd-Tree: father ptr incompatible with current node");
             }
             if (new_root_node != nullptr)
                 new_root_node->father_ptr = father_ptr;

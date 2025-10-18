@@ -10,6 +10,7 @@
 #include <cmath>
 #include <iomanip>
 #include <sstream>
+#include <unordered_set>
 #include <rclcpp/rclcpp.hpp>
 
 namespace localizers {
@@ -589,9 +590,11 @@ void DynamicObjectFilter::updateHistory(const CloudType::Ptr& cloud, double time
             temporal_info_history_.pop_front();
         }
     }
+    pruneHistoryKdTreeCache();
     
     // 清理过期数据
     cleanOldHistory(timestamp);
+    pruneHistoryKdTreeCache();
 }
 
 CloudType::Ptr DynamicObjectFilter::downsampleCloud(const CloudType::Ptr& cloud) {
@@ -658,6 +661,7 @@ void DynamicObjectFilter::cleanOldHistory(double current_timestamp) {
             temporal_info_history_.pop_front();
         }
     }
+    pruneHistoryKdTreeCache();
 }
 
 std::vector<int> DynamicObjectFilter::findCorrespondingPoints(
@@ -670,16 +674,18 @@ std::vector<int> DynamicObjectFilter::findCorrespondingPoints(
     }
     
     // 建立参考点云的KD树
-    pcl::KdTreeFLANN<PointType> ref_kdtree;
-    ref_kdtree.setInputCloud(reference_cloud);
+    auto ref_kdtree = getOrCreateHistoryKdTree(reference_cloud);
+    if (!ref_kdtree) {
+        return correspondence;
+    }
     
     // 对每个当前点找最近邻
     for (size_t i = 0; i < current_cloud->size(); ++i) {
         std::vector<int> nearest_indices(1);
         std::vector<float> nearest_distances(1);
         
-        if (ref_kdtree.nearestKSearch(current_cloud->points[i], 1, 
-                                     nearest_indices, nearest_distances) > 0) {
+        if (ref_kdtree->nearestKSearch(current_cloud->points[i], 1,
+                                       nearest_indices, nearest_distances) > 0) {
             // 距离阈值检查
             if (nearest_distances[0] < config_.search_radius * config_.search_radius) {
                 correspondence[i] = nearest_indices[0];
@@ -769,6 +775,7 @@ void DynamicObjectFilter::reset() {
     cloud_history_.clear();
     timestamp_history_.clear();
     temporal_info_history_.clear();
+    history_kdtree_cache_.clear();
     last_stats_.reset();
     
     if (debug_mode_) {
@@ -869,6 +876,52 @@ void DynamicObjectFilter::debugLog(const std::string& message) const {
                   << std::put_time(&tm, "%H:%M:%S") << " - " 
                   << message << std::endl;
     }
+}
+
+pcl::KdTreeFLANN<PointType>::Ptr DynamicObjectFilter::getOrCreateHistoryKdTree(
+    const CloudType::Ptr& cloud) const
+{
+    if (!cloud || cloud->empty()) {
+        return nullptr;
+    }
+
+    for (const auto& entry : history_kdtree_cache_) {
+        if (entry.cloud == cloud && entry.tree) {
+            return entry.tree;
+        }
+    }
+
+    auto tree = std::make_shared<pcl::KdTreeFLANN<PointType>>();
+    tree->setInputCloud(cloud);
+    history_kdtree_cache_.push_back({tree, cloud});
+
+    size_t max_cache = static_cast<size_t>(std::max(config_.history_size, 1));
+    size_t cache_limit = max_cache + 2;
+    while (history_kdtree_cache_.size() > cache_limit) {
+        history_kdtree_cache_.pop_front();
+    }
+
+    return tree;
+}
+
+void DynamicObjectFilter::pruneHistoryKdTreeCache() const
+{
+    if (history_kdtree_cache_.empty()) {
+        return;
+    }
+
+    std::unordered_set<const CloudType*> valid_clouds;
+    valid_clouds.reserve(cloud_history_.size());
+    for (const auto& cloud : cloud_history_) {
+        valid_clouds.insert(cloud.get());
+    }
+
+    history_kdtree_cache_.erase(
+        std::remove_if(history_kdtree_cache_.begin(), history_kdtree_cache_.end(),
+                       [&](const KdTreeCacheEntry& entry) {
+                           return !entry.cloud || valid_clouds.count(entry.cloud.get()) == 0;
+                       }),
+        history_kdtree_cache_.end());
 }
 
 size_t DynamicObjectFilter::calculateMemoryUsage() const {

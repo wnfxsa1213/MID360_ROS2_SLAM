@@ -237,9 +237,15 @@ public:
     void setDebugMode(bool enable);
 
 private:
+    struct KdTreeCacheEntry {
+        pcl::KdTreeFLANN<PointType>::Ptr tree;
+        CloudType::Ptr cloud;
+    };
+
     // 配置和状态
     DynamicFilterConfig config_;           ///< 过滤器配置
     mutable FilterMutex mutex_;            ///< 线程安全锁
+    mutable std::deque<KdTreeCacheEntry> history_kdtree_cache_;
     bool initialized_;                     ///< 初始化状态
     bool debug_mode_;                      ///< 调试模式
 
@@ -378,6 +384,9 @@ private:
      */
     CloudType::Ptr createFilteredCloud(const CloudType::Ptr& input_cloud,
                                       const std::vector<uint8_t>& dynamic_mask) const;
+
+    pcl::KdTreeFLANN<PointType>::Ptr getOrCreateHistoryKdTree(const CloudType::Ptr& cloud) const;
+    void pruneHistoryKdTreeCache() const;
 
     // ================ 性能和调试 ================
 

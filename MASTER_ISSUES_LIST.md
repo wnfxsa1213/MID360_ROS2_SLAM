@@ -588,7 +588,7 @@ ros2 topic echo /hba/status | grep -E "\[WARN\]|\[ERROR\]"
 
 ### 🚨 动态过滤器线程安全
 
-#### ❌ #7 updateStatistics递归死锁风险
+#### ✅ #7 updateStatistics递归死锁风险 *(2025-10-18 已修复)*
 **位置**: [dynamic_object_filter.cpp:53,809-818](ws_livox/src/localizer/src/localizers/dynamic_object_filter.cpp#L53)
 **发现时间**: 动态过滤器深度审查
 **影响**: 🔴 **随机死锁**
@@ -604,30 +604,17 @@ updateStatistics(...); // line 144
 calculateMemoryUsage(); // line 816 (若将来需要mutex_)
 ```
 
-**修复方案** (2小时):
-```cpp
-// 方案1: 使用递归锁
-std::recursive_mutex mutex_; // 替换std::mutex
+**状态更新 (2025-10-18)**:
+- ws_livox/src/localizer/src/localizers/dynamic_object_filter.h: 将 `mutex_` 改为 `std::recursive_mutex`，并新增别名 `FilterLockGuard` 统一加锁写法。
+- ws_livox/src/localizer/src/localizers/dynamic_object_filter.cpp: 所有 `std::lock_guard<std::mutex>` 替换为 `FilterLockGuard`，避免递归调用时死锁。
+- 重新编译 `colcon build --packages-select localizer --symlink-install`，通过确认线程模型正常。
 
-// 方案2: 重构锁粒度
-void filterDynamicObjects(...)
-{
-    CloudType::Ptr processed_cloud;
-    double processing_time_ms;
+**后续建议**:
+- 后续若要进一步优化性能，可按原方案拆分临界区，但当前递归锁已消除死锁隐患。
+- 建议在高并发场景下再跑一次过滤压力测试，确认递归锁开销可接受。
 
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        // 仅核心处理持锁
-        processed_cloud = doFiltering(input_cloud);
-    } // 释放锁
-
-    // 统计更新在锁外执行
-    updateStatistics(processed_cloud->size(), dynamic_count, processing_time_ms);
-}
-```
-
-**工作量**: ⏱️ 2小时
-**优先级**: 🔴 **中高**
+**工作量**: ⏱️ 2小时（已完成）
+**优先级**: 🔴 **已修复**
 
 ---
 

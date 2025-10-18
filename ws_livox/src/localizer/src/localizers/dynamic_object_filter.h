@@ -18,6 +18,9 @@
 
 namespace localizers {
 
+using FilterMutex = std::recursive_mutex;
+using FilterLockGuard = std::lock_guard<FilterMutex>;
+
 /**
  * @brief 点云时间信息结构体
  * 用于存储单个点的历史轨迹和时间一致性信息
@@ -236,7 +239,7 @@ public:
 private:
     // 配置和状态
     DynamicFilterConfig config_;           ///< 过滤器配置
-    mutable std::mutex mutex_;             ///< 线程安全锁
+    mutable FilterMutex mutex_;            ///< 线程安全锁
     bool initialized_;                     ///< 初始化状态
     bool debug_mode_;                      ///< 调试模式
 

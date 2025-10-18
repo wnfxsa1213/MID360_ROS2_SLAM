@@ -51,7 +51,7 @@ DynamicObjectFilter::DynamicObjectFilter(const DynamicFilterConfig& config)
 
 CloudType::Ptr DynamicObjectFilter::filterDynamicObjects(const CloudType::Ptr& input_cloud,
                                                         double timestamp) {
-  std::lock_guard<std::mutex> lock(mutex_);
+  FilterLockGuard lock(mutex_);
   
   auto start_time = std::chrono::high_resolution_clock::now();
   if (debug_mode_) {
@@ -720,7 +720,7 @@ CloudType::Ptr DynamicObjectFilter::createFilteredCloud(
 // ================ 配置和状态管理 ================
 
 bool DynamicObjectFilter::updateConfig(const DynamicFilterConfig& config) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    FilterLockGuard lock(mutex_);
     
     if (!config.isValid()) {
         if (debug_mode_) {
@@ -754,17 +754,17 @@ bool DynamicObjectFilter::updateConfig(const DynamicFilterConfig& config) {
 }
 
 DynamicFilterConfig DynamicObjectFilter::getConfig() const {
-    std::lock_guard<std::mutex> lock(mutex_);
+    FilterLockGuard lock(mutex_);
     return config_;
 }
 
 FilterStats DynamicObjectFilter::getLastFilterStats() const {
-    std::lock_guard<std::mutex> lock(mutex_);
+    FilterLockGuard lock(mutex_);
     return last_stats_;
 }
 
 void DynamicObjectFilter::reset() {
-    std::lock_guard<std::mutex> lock(mutex_);
+    FilterLockGuard lock(mutex_);
     
     cloud_history_.clear();
     timestamp_history_.clear();
@@ -777,7 +777,7 @@ void DynamicObjectFilter::reset() {
 }
 
 void DynamicObjectFilter::resetStats() {
-    std::lock_guard<std::mutex> lock(mutex_);
+    FilterLockGuard lock(mutex_);
     last_stats_.reset();
 }
 
@@ -786,12 +786,12 @@ bool DynamicObjectFilter::isInitialized() const {
 }
 
 double DynamicObjectFilter::getMemoryUsageMB() const {
-    std::lock_guard<std::mutex> lock(mutex_);
+    FilterLockGuard lock(mutex_);
     return calculateMemoryUsage() / (1024.0 * 1024.0);
 }
 
 CloudType::Ptr DynamicObjectFilter::getLastDynamicPoints() const {
-    std::lock_guard<std::mutex> lock(mutex_);
+    FilterLockGuard lock(mutex_);
 
     // 返回最近一次过滤的动态点云的深拷贝
     CloudType::Ptr dynamic_cloud = std::make_shared<CloudType>();
@@ -803,7 +803,7 @@ CloudType::Ptr DynamicObjectFilter::getLastDynamicPoints() const {
 }
 
 void DynamicObjectFilter::setDebugMode(bool enable) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    FilterLockGuard lock(mutex_);
     debug_mode_ = enable;
 }
 

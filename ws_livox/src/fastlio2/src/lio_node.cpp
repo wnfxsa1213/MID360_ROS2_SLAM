@@ -4,6 +4,8 @@
 #include <memory>
 #include <iostream>
 #include <chrono>
+#include <algorithm>
+#include <cctype>
 // #include <filesystem>
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/imu.hpp>
@@ -132,6 +134,13 @@ public:
         m_pool_resize_counter = 0;
         
         m_timer = this->create_wall_timer(10ms, std::bind(&LIONode::timerCB, this));
+
+        // 初始化协同状态时间戳，别让不同时间源坑我们
+        auto coop_now = this->get_clock()->now();
+        m_coop_state.last_pgo_update = coop_now;
+        m_coop_state.last_hba_update = coop_now;
+        m_coop_state.last_localizer_update = coop_now;
+
         last_world_cloud_publish_time_ = this->now();
     }
 
@@ -870,9 +879,9 @@ void LIONode::updatePoseCB(const std::shared_ptr<interface::srv::UpdatePose::Req
             request->source_component.c_str(), request->optimization_score);
 
         // 验证优化结果的可信度
-        if (request->optimization_score > 0.5) {
+        if (request->optimization_score < 0.5) {
             response->success = false;
-            response->message = "优化分数过低，拒绝更新";
+            response->message = "优化分数低于0.5阈值，拒绝更新";
             return;
         }
 
@@ -1015,14 +1024,29 @@ void LIONode::updateCooperationState(const std::string& source, double score)
     m_coop_state.average_optimization_score =
         alpha * score + (1.0 - alpha) * m_coop_state.average_optimization_score;
 
+    auto now = this->get_clock()->now();
+
+    std::string source_lower = source;
+    std::transform(source_lower.begin(), source_lower.end(), source_lower.begin(),
+        [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+
+    if (source_lower.find("pgo") != std::string::npos) {
+        m_coop_state.last_pgo_update = now;
+    } else if (source_lower.find("hba") != std::string::npos) {
+        m_coop_state.last_hba_update = now;
+    } else if (source_lower.find("localizer") != std::string::npos ||
+               source_lower.find("relocalization") != std::string::npos) {
+        m_coop_state.last_localizer_update = now;
+    }
+
     // 发布协同状态
     std_msgs::msg::Float64MultiArray msg;
     msg.data.resize(6);
     msg.data[0] = m_coop_state.feedback_count;
     msg.data[1] = m_coop_state.average_optimization_score;
-    msg.data[2] = (this->get_clock()->now() - m_coop_state.last_pgo_update).seconds();
-    msg.data[3] = (this->get_clock()->now() - m_coop_state.last_hba_update).seconds();
-    msg.data[4] = (this->get_clock()->now() - m_coop_state.last_localizer_update).seconds();
+    msg.data[2] = (now - m_coop_state.last_pgo_update).seconds();
+    msg.data[3] = (now - m_coop_state.last_hba_update).seconds();
+    msg.data[4] = (now - m_coop_state.last_localizer_update).seconds();
     msg.data[5] = 1.0; // 协同功能已启用
 
     m_coop_status_pub->publish(msg);

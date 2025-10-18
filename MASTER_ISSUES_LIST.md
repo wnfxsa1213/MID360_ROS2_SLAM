@@ -34,7 +34,7 @@
 
 ### 🚨 协同机制崩溃性问题
 
-#### ❌ #1 PGO反馈通道被逻辑BUG完全阻塞
+#### ✅ #1 PGO反馈通道被逻辑BUG完全阻塞 *(2025-10-18 已修复)*
 **位置**: [lio_node.cpp:865](ws_livox/src/fastlio2/src/lio_node.cpp#L865)
 **发现时间**: 协同机制分析
 **影响**: 🔴 **核心功能完全失效**
@@ -82,6 +82,14 @@ ros2 topic echo /fastlio2/cooperation_status
 
 **工作量**: ⏱️ 5分钟
 **优先级**: 🔴 **最高优先级 - 立即修复**
+
+**状态更新 (2025-10-18)**:
+- ws_livox/src/fastlio2/src/lio_node.cpp:873 将阈值判定改为 `< 0.5`，并同步更新拒绝提示语。
+- 同文件新增协同时间戳初始化与来源识别逻辑，避免 `/fastlio2/cooperation_status` 发布中出现不同 time source 的秒差异常。
+- 通过 `ros2 service call /fastlio2/update_pose interface/srv/UpdatePose` 手动发送 `optimization_score=0.8` 与 `0.3` 的请求验证：
+  - 0.8 → 返回 `success: true`，`message: "位姿更新成功"`。
+  - 0.3 → 返回 `success: false`，`message: "优化分数低于0.5阈值，拒绝更新"`。
+- 复验中 `/fastlio2/cooperation_status` 正常发布，未再出现 `can't subtract times with different time sources` 报错。
 
 ---
 

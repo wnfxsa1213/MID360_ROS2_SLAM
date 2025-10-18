@@ -12,6 +12,7 @@ find_package(std_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(nav_msgs REQUIRED)
 find_package(interface REQUIRED)
+find_package(Eigen3 REQUIRED)
 
 # 添加可执行文件
 add_executable(optimization_coordinator src/optimization_coordinator.cpp)
@@ -24,6 +25,10 @@ ament_target_dependencies(optimization_coordinator
   nav_msgs
   interface
 )
+
+if(Eigen3_FOUND)
+  target_include_directories(optimization_coordinator PUBLIC ${EIGEN3_INCLUDE_DIRS})
+endif()
 
 # 安装可执行文件
 install(TARGETS

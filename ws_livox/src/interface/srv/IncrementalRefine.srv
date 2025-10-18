@@ -1,0 +1,13 @@
+geometry_msgs/PoseArray keyframe_poses
+sensor_msgs/PointCloud2[] keyframe_clouds
+int32[] keyframe_indices
+bool reset
+bool run_optimization
+int32 max_iterations
+---
+bool success
+string message
+geometry_msgs/PoseArray optimized_poses
+float64[] pose_covariances
+int32 iterations_used
+float64 final_residual

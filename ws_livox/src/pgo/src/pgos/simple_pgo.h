@@ -4,7 +4,10 @@
 #include <pcl/common/transforms.h>
 #include <pcl/filters/voxel_grid.h>
 #include <pcl/registration/icp.h>
+#include <pcl/point_types.h>
 #include <deque>
+#include <list>
+#include <unordered_map>
 #include <gtsam/geometry/Rot3.h>
 #include <gtsam/geometry/Pose3.h>
 #include <gtsam/nonlinear/ISAM2.h>
@@ -47,6 +50,19 @@ struct Config
     int max_candidates = 5;              // 每次检测最多验证的候选数量
     int min_index_separation = 10;       // 关键帧索引最小间隔，避免近邻伪回环
     double inlier_threshold = 0.30;      // 计算内点时的距离阈值(米)
+    int loop_kdtree_update_batch = 10;   // 累计这么多新关键帧后再重建KD树
+    size_t submap_cache_size = 32;       // 子图缓存最大容量
+    int icp_max_iterations = 50;         // ICP最大迭代次数
+    double icp_transformation_epsilon = 1e-6; // ICP位姿收敛阈值
+    double icp_euclidean_fitness_epsilon = 1e-6; // ICP误差收敛阈值
+    double isam_relinearize_threshold = 0.01; // iSAM2 relinearize 阈值
+    int isam_relinearize_skip = 1;            // iSAM2 relinearize 间隔
+};
+
+struct PoseUpdate
+{
+    M3D r;
+    V3D t;
 };
 
 class SimplePGO
@@ -62,7 +78,10 @@ public:
 
     void searchForLoopPairs();
 
-    void smoothAndUpdate();
+    bool smoothAndUpdate();
+
+    void applyOptimizedPoses(const std::vector<size_t>& indices,
+                             const std::vector<PoseUpdate>& poses);
 
     CloudType::Ptr getSubMap(int idx, int half_range, double resolution);
     std::vector<std::pair<size_t, size_t>> &historyPairs() { return m_history_pairs; }
@@ -91,4 +110,49 @@ private:
     double computeInlierRatio(const CloudType::Ptr& src_aligned,
                               const CloudType::Ptr& tgt,
                               double dist_thresh) const;
+
+    // 关键帧位姿KD树缓存
+    void updateKeyPoseKdTree(size_t current_idx);
+    void resetKeyPoseKdTree();
+
+    struct SubmapCacheKey {
+        int idx;
+        int half_range;
+        int resolution_mm;
+
+        bool operator==(const SubmapCacheKey& other) const noexcept {
+            return idx == other.idx &&
+                   half_range == other.half_range &&
+                   resolution_mm == other.resolution_mm;
+        }
+    };
+
+    struct SubmapCacheKeyHasher {
+        std::size_t operator()(const SubmapCacheKey& key) const noexcept {
+            std::size_t h1 = std::hash<int>{}(key.idx);
+            std::size_t h2 = std::hash<int>{}(key.half_range);
+            std::size_t h3 = std::hash<int>{}(key.resolution_mm);
+            std::size_t seed = h1 ^ (h2 + 0x9e3779b9 + (h1 << 6) + (h1 >> 2));
+            return seed ^ (h3 + 0x9e3779b9 + (seed << 6) + (seed >> 2));
+        }
+    };
+
+    struct SubmapCacheEntry {
+        CloudType::Ptr cloud;
+        std::list<SubmapCacheKey>::iterator lru_it;
+    };
+
+    void invalidateSubmapCache();
+    int quantizeResolution(double resolution) const;
+    static int clampHalfRange(int half_range, size_t pose_count);
+
+    pcl::PointCloud<pcl::PointXYZ>::Ptr m_key_pose_cloud;
+    pcl::KdTreeFLANN<pcl::PointXYZ> m_key_pose_kdtree;
+    std::vector<int> m_kdtree_index_map;
+    size_t m_kdtree_populated_count = 0;
+    size_t m_new_key_poses_since_rebuild = 0;
+    bool m_kdtree_dirty = false;
+
+    std::unordered_map<SubmapCacheKey, SubmapCacheEntry, SubmapCacheKeyHasher> m_submap_cache;
+    std::list<SubmapCacheKey> m_submap_lru;
 };

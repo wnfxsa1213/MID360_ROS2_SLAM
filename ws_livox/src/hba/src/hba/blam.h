@@ -1,6 +1,7 @@
 #pragma once
 #include <cstdint>
 #include <Eigen/Eigen>
+#include <Eigen/Sparse>
 #include <unordered_map>
 #include <sophus/so3.hpp>
 
@@ -106,8 +107,9 @@ public:
     VoxelMap &voxelMap() { return m_voxel_map; }
     Vec<Pose> &poses() { return m_poses; }
     Vec<OctoTree *> &planes() { return m_planes; }
-    Eigen::MatrixXd &H() { return m_H; }
-    Eigen::VectorXd &J() { return m_J; }
+    const Eigen::SparseMatrix<double> &H() const { return m_H; }
+    const Eigen::VectorXd &J() const { return m_J; }
+    M6D informationBlock(size_t row_pose, size_t col_pose) const;
 
     void insert(pcl::PointCloud<pcl::PointXYZI>::Ptr &cloud, const Pose &pose);
 
@@ -135,6 +137,7 @@ private:
     VoxelMap m_voxel_map;
     Vec<OctoTree *> m_planes;
     Vec<pcl::PointCloud<pcl::PointXYZI>::Ptr> m_clouds;
-    Eigen::MatrixXd m_H;
+    Eigen::SparseMatrix<double> m_H;
     Eigen::VectorXd m_J;
+    Eigen::VectorXd m_diag_cache;
 };

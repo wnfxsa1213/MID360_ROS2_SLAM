@@ -1,4 +1,6 @@
 #include "blam.h"
+#include <Eigen/SparseCholesky>
+#include <functional>
 VoxelKey VoxelKey::index(double x, double y, double z, double resolution, double bias)
 {
     V3D point(x, y, z);
@@ -321,8 +323,10 @@ void BLAM::buildVoxels()
 }
 void BLAM::updateJaccAndHess()
 {
-    m_H.setZero();
-    m_J.setZero();
+    const size_t pose_dim = m_poses.size() * 6;
+    std::vector<Eigen::Triplet<double>> triplets;
+    triplets.reserve(pose_dim * 12);
+    m_J = Eigen::VectorXd::Zero(pose_dim);
     for (size_t i = 0; i < m_planes.size(); i++)
     {
         OctoTree *plane_ptr = m_planes[i];
@@ -357,42 +361,63 @@ void BLAM::updateJaccAndHess()
             for (size_t n = m; n < idxs.size(); n++)
             {
                 uint32_t p_id2 = idxs[n];
-                m_H.block<6, 6>(p_id1 * 6, p_id2 * 6) += H_bar.block<6, 6>(m * 6, n * 6);
-                if (m == n)
-                    continue;
-                m_H.block<6, 6>(p_id2 * 6, p_id1 * 6) += H_bar.block<6, 6>(n * 6, m * 6);
+                int row_base = static_cast<int>(p_id1 * 6);
+                int col_base = static_cast<int>(p_id2 * 6);
+                for (int r = 0; r < 6; ++r)
+                {
+                    for (int c = 0; c < 6; ++c)
+                    {
+                        double value = H_bar(m * 6 + r, n * 6 + c);
+                        if (std::abs(value) < 1e-12)
+                            continue;
+                        triplets.emplace_back(row_base + r, col_base + c, value);
+                        if (p_id1 != p_id2)
+                        {
+                            triplets.emplace_back(col_base + c, row_base + r, value);
+                        }
+                    }
+                }
             }
-            m_J.block<6, 1>(p_id1 * 6, 0) += J_bar.block<6, 1>(m * 6, 0);
+            m_J.segment<6>(p_id1 * 6) += J_bar.block<6, 1>(m * 6, 0);
         }
     }
+    m_H.resize(pose_dim, pose_dim);
+    m_H.setFromTriplets(triplets.begin(), triplets.end(), std::plus<double>());
+    m_H.makeCompressed();
+    m_diag_cache = m_H.diagonal();
 }
 void BLAM::optimize()
 {
     buildVoxels();
-    Eigen::MatrixXd D;
-    D.resize(m_poses.size() * 6, m_poses.size() * 6);
-    m_H.resize(m_poses.size() * 6, m_poses.size() * 6);
-    m_J.resize(m_poses.size() * 6);
+    const size_t pose_dim = m_poses.size() * 6;
+    m_J.resize(pose_dim);
     double residual = 0.0;
     bool build_hess = true;
     double u = 0.01, v = 2.0;
-
+    Eigen::VectorXd diag;
     for (size_t i = 0; i < m_config.max_iter; i++)
     {
         if (build_hess)
         {
             residual = updatePlanesByPoses(m_poses);
             updateJaccAndHess();
+            diag = m_diag_cache;
         }
-        D = m_H.diagonal().asDiagonal();
-        Eigen::MatrixXd Hess = m_H + u * D;
+        Eigen::SparseMatrix<double> Hess = m_H;
+        Hess.reserve(Hess.nonZeros() + pose_dim);
+        for (int idx = 0; idx < static_cast<int>(pose_dim); ++idx)
+        {
+            double add = u * diag(idx);
+            if (add != 0.0)
+            {
+                Hess.coeffRef(idx, idx) += add;
+            }
+        }
+        Hess.makeCompressed();
 
-        Eigen::JacobiSVD<Eigen::MatrixXd> svd(Hess);
-        const auto& singular_values = svd.singularValues();
-        double cond_num = std::numeric_limits<double>::infinity();
-        if (singular_values.size() > 0 && singular_values.minCoeff() > 0.0) {
-            cond_num = singular_values.maxCoeff() / singular_values.minCoeff();
-        }
+        double max_diag = diag.size() > 0 ? diag.maxCoeff() : 0.0;
+        double min_diag = diag.size() > 0 ? diag.minCoeff() : 0.0;
+        double cond_num = (min_diag > 1e-12) ? max_diag / min_diag : std::numeric_limits<double>::infinity();
 
         if (!std::isfinite(cond_num) || cond_num > 1e12) {
             std::cerr << "[HBA][WARN] Hessian condition number too large: " << cond_num
@@ -403,8 +428,17 @@ void BLAM::optimize()
             continue;
         }
 
-        Eigen::VectorXd delta = Hess.colPivHouseholderQr().solve(-m_J);
-        if (!delta.allFinite()) {
+        Eigen::SimplicialLDLT<Eigen::SparseMatrix<double>> solver;
+        solver.compute(Hess);
+        if (solver.info() != Eigen::Success)
+        {
+            u *= v;
+            build_hess = false;
+            continue;
+        }
+
+        Eigen::VectorXd delta = solver.solve(-m_J);
+        if (solver.info() != Eigen::Success || !delta.allFinite()) {
             std::cerr << "[HBA][ERROR] Hessian solve returned non-finite delta, abort optimization"
                       << std::endl;
             break;
@@ -412,7 +446,12 @@ void BLAM::optimize()
         Vec<Pose> temp_pose(m_poses.begin(), m_poses.end());
         plusDelta(temp_pose, delta);
         double residual_new = evalPlanesByPoses(temp_pose);
-        double pho = (residual - residual_new) / (0.5 * (delta.transpose() * (u * D * delta - m_J))[0]);
+        Eigen::VectorXd diag_delta = diag.cwiseProduct(delta);
+        double denom = 0.5 * delta.dot(u * diag_delta - m_J);
+        if (std::abs(denom) < 1e-12) {
+            denom = std::copysign(1e-12, denom);
+        }
+        double pho = (residual - residual_new) / denom;
         if (pho > 0)
         {
             build_hess = true;
@@ -466,6 +505,32 @@ int BLAM::planeCount(bool with_sub_planes)
             count += 1;
     }
     return count;
+}
+
+M6D BLAM::informationBlock(size_t row_pose, size_t col_pose) const
+{
+    M6D block = M6D::Zero();
+    if (m_H.rows() == 0 || m_H.cols() == 0)
+    {
+        return block;
+    }
+
+    int row_start = static_cast<int>(row_pose * 6);
+    int row_end = row_start + 6;
+    int col_start = static_cast<int>(col_pose * 6);
+    int col_end = col_start + 6;
+
+    for (int col = col_start; col < col_end; ++col)
+    {
+        for (Eigen::SparseMatrix<double>::InnerIterator it(m_H, col); it; ++it)
+        {
+            if (it.row() >= row_start && it.row() < row_end)
+            {
+                block(it.row() - row_start, col - col_start) = it.value();
+            }
+        }
+    }
+    return block;
 }
 
 void BLAM::plusDelta(Vec<Pose> &poses, const Eigen::VectorXd &x)

@@ -12,11 +12,14 @@
 #include <visualization_msgs/msg/marker_array.hpp>
 #include <visualization_msgs/msg/marker.hpp>
 #include <queue>
+#include <algorithm>
 #include <filesystem>
+#include <atomic>
 #include "pgos/commons.h"
 #include "pgos/simple_pgo.h"
 #include "interface/srv/save_maps.hpp"
 #include "interface/srv/get_optimized_pose.hpp"
+#include "interface/srv/incremental_refine.hpp"
 #include <pcl/io/io.h>
 #include <fstream>
 #include <yaml-cpp/yaml.h>
@@ -29,6 +32,10 @@ struct NodeConfig
     std::string odom_topic = "fastlio2/lio_odom";
     std::string map_frame = "map";
     std::string local_frame = "lidar";
+    bool enable_hba_incremental = true;
+    int hba_incremental_window = 20;
+    int hba_incremental_iterations = 2;
+    int hba_trigger_interval = 50;
 };
 
 struct NodeState
@@ -63,6 +70,9 @@ public:
         m_get_optimized_pose_srv = this->create_service<interface::srv::GetOptimizedPose>(
             "pgo/get_optimized_pose",
             std::bind(&PGONode::getOptimizedPoseCB, this, std::placeholders::_1, std::placeholders::_2));
+
+        m_hba_incremental_client = this->create_client<interface::srv::IncrementalRefine>(
+            "hba/incremental_refine");
     }
 
     void loadParameters()
@@ -106,6 +116,33 @@ public:
         }
         if (config["inlier_threshold"]) {
             m_pgo_config.inlier_threshold = config["inlier_threshold"].as<double>();
+        }
+        if (config["icp_max_iterations"]) {
+            m_pgo_config.icp_max_iterations = config["icp_max_iterations"].as<int>();
+        }
+        if (config["icp_transformation_epsilon"]) {
+            m_pgo_config.icp_transformation_epsilon = config["icp_transformation_epsilon"].as<double>();
+        }
+        if (config["icp_euclidean_fitness_epsilon"]) {
+            m_pgo_config.icp_euclidean_fitness_epsilon = config["icp_euclidean_fitness_epsilon"].as<double>();
+        }
+        if (config["isam_relinearize_threshold"]) {
+            m_pgo_config.isam_relinearize_threshold = config["isam_relinearize_threshold"].as<double>();
+        }
+        if (config["isam_relinearize_skip"]) {
+            m_pgo_config.isam_relinearize_skip = config["isam_relinearize_skip"].as<int>();
+        }
+        if (config["enable_hba_incremental"]) {
+            m_node_config.enable_hba_incremental = config["enable_hba_incremental"].as<bool>();
+        }
+        if (config["hba_incremental_window"]) {
+            m_node_config.hba_incremental_window = config["hba_incremental_window"].as<int>();
+        }
+        if (config["hba_incremental_iterations"]) {
+            m_node_config.hba_incremental_iterations = config["hba_incremental_iterations"].as<int>();
+        }
+        if (config["hba_trigger_interval"]) {
+            m_node_config.hba_trigger_interval = config["hba_trigger_interval"].as<int>();
         }
     }
     void syncCB(const sensor_msgs::msg::PointCloud2::ConstSharedPtr &cloud_msg, const nav_msgs::msg::Odometry::ConstSharedPtr &odom_msg)
@@ -230,20 +267,26 @@ public:
         builtin_interfaces::msg::Time cur_time;
         cur_time.sec = cp.pose.sec;
         cur_time.nanosec = cp.pose.nsec;
-        if (!m_pgo->addKeyPose(cp))
+
+        bool loop_closed = false;
         {
+            std::lock_guard<std::mutex> lock(m_pgo_mutex);
+            if (!m_pgo->addKeyPose(cp))
+            {
+                sendBroadCastTF(cur_time);
+                return;
+            }
+
+            m_pgo->searchForLoopPairs();
+
+            loop_closed = m_pgo->smoothAndUpdate();
 
             sendBroadCastTF(cur_time);
-            return;
+
+            publishLoopMarkers(cur_time);
         }
 
-        m_pgo->searchForLoopPairs();
-
-        m_pgo->smoothAndUpdate();
-
-        sendBroadCastTF(cur_time);
-
-        publishLoopMarkers(cur_time);
+        triggerIncrementalHBAAsync(loop_closed);
     }
 
     void saveMapsCB(const std::shared_ptr<interface::srv::SaveMaps::Request> request, std::shared_ptr<interface::srv::SaveMaps::Response> response)
@@ -319,10 +362,17 @@ private:
     rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr m_loop_marker_pub;
     rclcpp::Service<interface::srv::SaveMaps>::SharedPtr m_save_map_srv;
     rclcpp::Service<interface::srv::GetOptimizedPose>::SharedPtr m_get_optimized_pose_srv;
+    rclcpp::Client<interface::srv::IncrementalRefine>::SharedPtr m_hba_incremental_client;
     message_filters::Subscriber<sensor_msgs::msg::PointCloud2> m_cloud_sub;
     message_filters::Subscriber<nav_msgs::msg::Odometry> m_odom_sub;
     std::shared_ptr<tf2_ros::TransformBroadcaster> m_tf_broadcaster;
     std::shared_ptr<message_filters::Synchronizer<message_filters::sync_policies::ApproximateTime<sensor_msgs::msg::PointCloud2, nav_msgs::msg::Odometry>>> m_sync;
+    std::atomic<bool> m_hba_request_inflight{false};
+    size_t m_last_hba_trigger_pose_count = 0;
+    std::mutex m_pgo_mutex;
+
+    void triggerIncrementalHBAAsync(bool loop_closed);
+    PoseUpdate poseFromMsg(const geometry_msgs::msg::Pose &pose_msg) const;
 
     void getOptimizedPoseCB(const std::shared_ptr<interface::srv::GetOptimizedPose::Request> /*request*/,
                             std::shared_ptr<interface::srv::GetOptimizedPose::Response> response)
@@ -377,6 +427,142 @@ private:
         response->optimization_score = score;
     }
 };
+
+void PGONode::triggerIncrementalHBAAsync(bool loop_closed)
+{
+    if (!m_node_config.enable_hba_incremental || !loop_closed) {
+        return;
+    }
+
+    if (!m_hba_incremental_client || m_hba_request_inflight.load()) {
+        return;
+    }
+
+    if (!m_hba_incremental_client->service_is_ready()) {
+        RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
+                             "HBA incremental service unavailable");
+        return;
+    }
+
+    std::vector<KeyPoseWithCloud> keyposes_copy;
+    {
+        std::lock_guard<std::mutex> lock(m_pgo_mutex);
+        keyposes_copy = m_pgo->keyPoses();
+    }
+
+    size_t total = keyposes_copy.size();
+    if (total == 0) {
+        return;
+    }
+
+    int window_cfg = std::max(1, m_node_config.hba_incremental_window);
+    size_t window = std::min(static_cast<size_t>(window_cfg), total);
+    if (window < static_cast<size_t>(window_cfg)) {
+        return;
+    }
+
+    int interval_cfg = std::max(1, m_node_config.hba_trigger_interval);
+    if (total - m_last_hba_trigger_pose_count < static_cast<size_t>(interval_cfg)) {
+        return;
+    }
+
+    size_t start_idx = total - window;
+    auto request = std::make_shared<interface::srv::IncrementalRefine::Request>();
+    request->reset = true;
+    request->run_optimization = true;
+    request->max_iterations = m_node_config.hba_incremental_iterations;
+    request->keyframe_poses.header.stamp = this->now();
+    request->keyframe_poses.header.frame_id = m_node_config.map_frame;
+    request->keyframe_poses.poses.reserve(window);
+    request->keyframe_clouds.reserve(window);
+    request->keyframe_indices.reserve(window);
+
+    for (size_t i = start_idx; i < total; ++i) {
+        const auto &kp = keyposes_copy[i];
+        geometry_msgs::msg::Pose pose_msg;
+        pose_msg.position.x = kp.t_global.x();
+        pose_msg.position.y = kp.t_global.y();
+        pose_msg.position.z = kp.t_global.z();
+        Eigen::Quaterniond q(kp.r_global);
+        pose_msg.orientation.w = q.w();
+        pose_msg.orientation.x = q.x();
+        pose_msg.orientation.y = q.y();
+        pose_msg.orientation.z = q.z();
+        request->keyframe_poses.poses.push_back(pose_msg);
+
+        sensor_msgs::msg::PointCloud2 cloud_msg;
+        pcl::toROSMsg(*kp.body_cloud, cloud_msg);
+        cloud_msg.header.frame_id = m_node_config.local_frame;
+        cloud_msg.header.stamp = this->now();
+        request->keyframe_clouds.push_back(cloud_msg);
+        request->keyframe_indices.push_back(static_cast<int32_t>(i));
+    }
+
+    std::vector<int32_t> index_copy = request->keyframe_indices;
+    m_hba_request_inflight.store(true);
+    m_last_hba_trigger_pose_count = total;
+
+    auto future = m_hba_incremental_client->async_send_request(
+        request,
+        [this, index_copy, request](rclcpp::Client<interface::srv::IncrementalRefine>::SharedFuture future_resp) {
+            try {
+                auto response = future_resp.get();
+                m_hba_request_inflight.store(false);
+                if (!response->success) {
+                    RCLCPP_WARN(this->get_logger(), "Incremental HBA failed: %s", response->message.c_str());
+                    return;
+                }
+
+                std::vector<size_t> pose_indices;
+                pose_indices.reserve(index_copy.size());
+                for (int32_t id : index_copy) {
+                    if (id < 0) continue;
+                    pose_indices.push_back(static_cast<size_t>(id));
+                }
+
+                std::vector<PoseUpdate> optimized;
+                optimized.reserve(response->optimized_poses.poses.size());
+                for (const auto &pose_msg : response->optimized_poses.poses) {
+                    optimized.push_back(poseFromMsg(pose_msg));
+                }
+
+                size_t count = std::min(pose_indices.size(), optimized.size());
+                pose_indices.resize(count);
+                optimized.resize(count);
+
+                if (count == 0) {
+                    RCLCPP_WARN(this->get_logger(), "Incremental HBA returned empty pose set");
+                    return;
+                }
+
+                {
+                    std::lock_guard<std::mutex> lock(m_pgo_mutex);
+                    m_pgo->applyOptimizedPoses(pose_indices, optimized);
+                }
+
+                RCLCPP_INFO(this->get_logger(),
+                            "Incremental HBA applied to %zu frames, residual %.6f",
+                            count, response->final_residual);
+            } catch (const std::exception &e) {
+                m_hba_request_inflight.store(false);
+                RCLCPP_ERROR(this->get_logger(), "Incremental HBA call failed: %s", e.what());
+            }
+        });
+
+    (void)future;
+}
+
+PoseUpdate PGONode::poseFromMsg(const geometry_msgs::msg::Pose &pose_msg) const
+{
+    PoseUpdate pose;
+    pose.t = V3D(pose_msg.position.x, pose_msg.position.y, pose_msg.position.z);
+    Eigen::Quaterniond q(pose_msg.orientation.w,
+                         pose_msg.orientation.x,
+                         pose_msg.orientation.y,
+                         pose_msg.orientation.z);
+    pose.r = q.normalized().toRotationMatrix();
+    return pose;
+}
 
 int main(int argc, char **argv)
 {

@@ -4,7 +4,8 @@
 #include <pcl/point_types.h>
 #include <pcl/kdtree/kdtree_flann.h>
 #include <pcl/filters/voxel_grid.h>
-#include <pcl/features/normal_3d.h>
+#include <pcl/features/integral_image_normal.h>
+#include <pcl/features/normal_3d_omp.h>
 #include <pcl/search/kdtree.h>
 #include <Eigen/Eigen>
 #include <deque>
@@ -63,8 +64,8 @@ struct PointTemporalInfo {
 struct DynamicFilterConfig {
     // 时间一致性参数
     float motion_threshold = 0.1f;        ///< 运动阈值(m)
-    int history_size = 5;                 ///< 历史帧数
-    float stability_threshold = 0.8f;     ///< 稳定性阈值
+    int history_size = 8;                 ///< 历史帧数
+    float stability_threshold = 0.75f;    ///< 稳定性阈值
     double max_time_diff = 0.5;           ///< 最大时间差(s)
 
     // 几何特征参数
@@ -72,10 +73,11 @@ struct DynamicFilterConfig {
     int min_neighbors = 10;               ///< 最小邻居点数
     float normal_consistency_thresh = 0.8f; ///< 法向量一致性阈值
     float density_ratio_thresh = 0.5f;    ///< 密度比值阈值
+    float uncertain_smoothness_thresh = 0.6f; ///< 不确定状态下判定动态的表面平滑度阈值
 
     // 性能参数
-    int downsample_ratio = 2;             ///< 降采样比例
-    int max_points_per_frame = 50000;     ///< 每帧最大点数
+    int downsample_ratio = 1;             ///< 降采样比例
+    int max_points_per_frame = 60000;     ///< 每帧最大点数
     float voxel_size_base = 0.01f;        ///< 基础体素大小(m)
 
     /**
@@ -91,6 +93,7 @@ struct DynamicFilterConfig {
                min_neighbors > 0 &&
                normal_consistency_thresh >= 0.0f && normal_consistency_thresh <= 1.0f &&
                density_ratio_thresh >= 0.0f && density_ratio_thresh <= 1.0f &&
+               uncertain_smoothness_thresh > 0.0f && uncertain_smoothness_thresh <= 1.0f &&
                downsample_ratio > 0 &&
                max_points_per_frame > 0 &&
                voxel_size_base > 0.0f;
@@ -257,7 +260,7 @@ private:
     // 计算组件
     pcl::KdTreeFLANN<PointType> kdtree_;                ///< KD树用于邻域搜索
     pcl::VoxelGrid<PointType> voxel_filter_;            ///< 体素滤波器
-    pcl::NormalEstimation<PointType, pcl::Normal> normal_estimator_; ///< 法向量估计器
+    pcl::NormalEstimationOMP<PointType, pcl::Normal> normal_estimator_; ///< 法向量估计器（并行）
     pcl::search::KdTree<PointType>::Ptr search_tree_;   ///< 搜索树
 
     // 统计信息
@@ -342,7 +345,9 @@ private:
         float smoothness;         ///< 表面平滑度
     };
     DensityFeatures analyzeDensityFeatures(const CloudType::Ptr& cloud, 
-                                          size_t point_idx) const;
+                                          size_t point_idx,
+                                          const std::vector<int>& neighbor_indices,
+                                          const std::vector<float>& neighbor_distances) const;
 
     // ================ 工具函数 ================
 

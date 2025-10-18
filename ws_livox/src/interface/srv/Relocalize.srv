@@ -5,6 +5,8 @@ float32 z
 float32 yaw
 float32 pitch
 float32 roll
+bool force_relocalize
 ---
 bool success
 string message
+geometry_msgs/Pose refined_pose

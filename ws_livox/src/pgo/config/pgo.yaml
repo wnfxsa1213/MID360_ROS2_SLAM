@@ -1,6 +1,6 @@
 # PGO配置文件
 # 由配置生成器自动生成，请勿手动修改
-# 生成时间: 2025-10-18 11:20:55
+# 生成时间: 2025-10-18 20:29:44
 # 主配置文件: /home/tianyu/codes/Mid360map/config/master_config.yaml
 
 cloud_topic: /localizer/filtered_cloud
@@ -15,3 +15,8 @@ map_frame: map
 min_loop_detect_duration: 2.0
 odom_topic: /slam/lio_odom
 submap_resolution: 0.1
+icp_max_iterations: 50
+icp_transformation_epsilon: 1.0e-6
+icp_euclidean_fitness_epsilon: 1.0e-6
+isam_relinearize_threshold: 0.01
+isam_relinearize_skip: 1

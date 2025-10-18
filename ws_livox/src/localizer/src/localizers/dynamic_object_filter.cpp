@@ -11,6 +11,8 @@
 #include <iomanip>
 #include <sstream>
 #include <unordered_set>
+#include <limits>
+#include <thread>
 #include <rclcpp/rclcpp.hpp>
 
 namespace localizers {
@@ -414,6 +416,48 @@ std::vector<uint8_t> DynamicObjectFilter::geometricConsistencyCheck(
     // 使用局部KD树（避免在并行中访问共享KD树导致未定义行为）
     pcl::KdTreeFLANN<PointType> local_kdtree;
     local_kdtree.setInputCloud(cloud);
+
+    enum class PointClassification {
+        Static,
+        Dynamic,
+        Uncertain
+    };
+
+    auto classifyPoint = [](bool temporalDynamic, bool geometricDynamic) -> PointClassification {
+        if (temporalDynamic && geometricDynamic) {
+            return PointClassification::Dynamic;
+        }
+        if (!temporalDynamic && !geometricDynamic) {
+            return PointClassification::Static;
+        }
+        return PointClassification::Uncertain;
+    };
+
+    auto resolveUncertainDecision = [this](bool temporalDynamic,
+                                           bool geometricDynamic,
+                                           const DensityFeatures& density_features) -> bool {
+        if (temporalDynamic && !geometricDynamic) {
+            if (density_features.smoothness < config_.uncertain_smoothness_thresh) {
+                return true;
+            }
+            if (density_features.density_variance > 0.5f * config_.density_ratio_thresh) {
+                return true;
+            }
+            return false;
+        }
+
+        if (!temporalDynamic && geometricDynamic) {
+            if (density_features.density_variance > config_.density_ratio_thresh) {
+                return true;
+            }
+            if (density_features.smoothness < config_.uncertain_smoothness_thresh * 0.8f) {
+                return true;
+            }
+            return false;
+        }
+
+        return false;
+    };
     
     // 顺序处理每个候选动态点，确保稳定性。必要时可改为分块并行并加互斥保护。
     for (size_t idx = 0; idx < final_mask.size(); ++idx) {
@@ -435,7 +479,8 @@ std::vector<uint8_t> DynamicObjectFilter::geometricConsistencyCheck(
         }
 
         // 分析密度特征
-        DensityFeatures density_features = analyzeDensityFeatures(cloud, idx);
+        DensityFeatures density_features = analyzeDensityFeatures(
+            cloud, idx, neighbor_indices, neighbor_distances);
 
         // 法向量一致性检查
         const auto& current_normal = normals->points[idx];
@@ -485,8 +530,35 @@ std::vector<uint8_t> DynamicObjectFilter::geometricConsistencyCheck(
             is_geometrically_consistent = false;
         }
 
-        // 最终决策：只有时间和几何都认为是动态的点才标记为动态
-        final_mask[idx] = (dynamic_candidates[idx] && !is_geometrically_consistent) ? 1 : 0;
+        const bool temporal_dynamic = dynamic_candidates[idx] != 0;
+        const bool geometric_dynamic = !is_geometrically_consistent;
+        PointClassification classification = classifyPoint(temporal_dynamic, geometric_dynamic);
+
+        switch (classification) {
+            case PointClassification::Dynamic:
+                final_mask[idx] = 1;
+                break;
+            case PointClassification::Static:
+                final_mask[idx] = 0;
+                break;
+            case PointClassification::Uncertain: {
+                bool mark_dynamic = resolveUncertainDecision(temporal_dynamic,
+                                                             geometric_dynamic,
+                                                             density_features);
+                final_mask[idx] = mark_dynamic ? 1 : 0;
+                if (debug_mode_) {
+                    std::ostringstream ss;
+                    ss << "[geometric] point " << idx
+                       << " uncertain, temporal=" << temporal_dynamic
+                       << ", smoothness=" << std::fixed << std::setprecision(3)
+                       << density_features.smoothness
+                       << ", density_var=" << density_features.density_variance
+                       << ", decision=" << (mark_dynamic ? "dynamic" : "static");
+                    debugLog(ss.str());
+                }
+                break;
+            }
+        }
     }
 
     return final_mask;
@@ -502,8 +574,22 @@ pcl::PointCloud<pcl::Normal>::Ptr DynamicObjectFilter::computeNormals(
     }
     
     try {
-        normal_estimator_.setInputCloud(cloud);
-        normal_estimator_.compute(*normals);
+        if (cloud->isOrganized() && cloud->height > 1) {
+            // 这个SB点云是有序的，直接用积分图法向量算法怼成 O(N)
+            pcl::IntegralImageNormalEstimation<PointType, pcl::Normal> integral_estimator;
+            integral_estimator.setNormalEstimationMethod(
+                pcl::IntegralImageNormalEstimation<PointType, pcl::Normal>::AVERAGE_3D_GRADIENT);
+            integral_estimator.setMaxDepthChangeFactor(0.02f);
+            integral_estimator.setNormalSmoothingSize(10.0f);
+            integral_estimator.setInputCloud(cloud);
+            integral_estimator.compute(*normals);
+        } else {
+            const unsigned int hw_threads = std::thread::hardware_concurrency();
+            const int thread_count = static_cast<int>(hw_threads > 0 ? hw_threads : 4);
+            normal_estimator_.setNumberOfThreads(thread_count);
+            normal_estimator_.setInputCloud(cloud);
+            normal_estimator_.compute(*normals);
+        }
     } catch (const std::exception& e) {
         if (debug_mode_) {
             debugLog("法向量计算异常: " + std::string(e.what()));
@@ -515,30 +601,26 @@ pcl::PointCloud<pcl::Normal>::Ptr DynamicObjectFilter::computeNormals(
 }
 
 DynamicObjectFilter::DensityFeatures DynamicObjectFilter::analyzeDensityFeatures(
-    const CloudType::Ptr& cloud, size_t point_idx) const {
+    const CloudType::Ptr& cloud, size_t point_idx,
+    const std::vector<int>& neighbor_indices,
+    const std::vector<float>& neighbor_distances) const {
     
     DensityFeatures features{0.0f, 0.0f, 0.0f};
     
-    if (point_idx >= cloud->size()) {
+    if (point_idx >= cloud->size() ||
+        neighbor_indices.size() < 2 ||
+        neighbor_indices.size() != neighbor_distances.size()) {
         return features;
     }
     
-    // 邻域搜索
-    std::vector<int> neighbor_indices;
-    std::vector<float> neighbor_distances;
-    
-    int found_neighbors = kdtree_.radiusSearch(
-        cloud->points[point_idx], config_.search_radius,
-        neighbor_indices, neighbor_distances);
-    
-    if (found_neighbors < 2) {
-        return features;
-    }
+    const int neighbor_count = static_cast<int>(neighbor_indices.size());
     
     // 计算局部密度
     float sphere_volume = (4.0f / 3.0f) * M_PI * 
                          std::pow(config_.search_radius, 3);
-    features.local_density = found_neighbors / sphere_volume;
+    if (sphere_volume > std::numeric_limits<float>::min()) {
+        features.local_density = neighbor_count / sphere_volume;
+    }
     
     // 计算距离方差（密度均匀性的指标）
     float mean_distance = std::accumulate(neighbor_distances.begin(), 
@@ -553,13 +635,14 @@ DynamicObjectFilter::DensityFeatures DynamicObjectFilter::analyzeDensityFeatures
     features.density_variance = distance_variance;
     
     // 表面平滑度（基于邻居点的分布）
-    if (found_neighbors >= 3) {
+    if (neighbor_count >= 3) {
         Eigen::Vector3f center_point(cloud->points[point_idx].x,
                                     cloud->points[point_idx].y,
                                     cloud->points[point_idx].z);
         
         float total_deviation = 0.0f;
-        for (int neighbor_idx : neighbor_indices) {
+        for (size_t idx = 0; idx < neighbor_indices.size(); ++idx) {
+            int neighbor_idx = neighbor_indices[idx];
             if (neighbor_idx != static_cast<int>(point_idx)) {
                 Eigen::Vector3f neighbor_point(cloud->points[neighbor_idx].x,
                                               cloud->points[neighbor_idx].y,
@@ -569,7 +652,7 @@ DynamicObjectFilter::DensityFeatures DynamicObjectFilter::analyzeDensityFeatures
                 total_deviation += std::abs(distance_to_center - mean_distance);
             }
         }
-        features.smoothness = 1.0f / (1.0f + total_deviation / found_neighbors);
+        features.smoothness = 1.0f / (1.0f + total_deviation / neighbor_count);
     }
     
     return features;

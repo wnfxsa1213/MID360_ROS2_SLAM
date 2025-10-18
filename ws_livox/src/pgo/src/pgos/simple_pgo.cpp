@@ -1,22 +1,26 @@
 #include "simple_pgo.h"
 #include <limits>
+#include <cmath>
 
 SimplePGO::SimplePGO(const Config &config) : m_config(config)
 {
     gtsam::ISAM2Params isam2_params;
-    isam2_params.relinearizeThreshold = 0.01;
-    isam2_params.relinearizeSkip = 1;
+    isam2_params.relinearizeThreshold = m_config.isam_relinearize_threshold;
+    isam2_params.relinearizeSkip = m_config.isam_relinearize_skip;
     m_isam2 = std::make_shared<gtsam::ISAM2>(isam2_params);
     m_initial_values.clear();
     m_graph.resize(0);
     m_r_offset.setIdentity();
     m_t_offset.setZero();
 
-    m_icp.setMaximumIterations(50);
+    m_icp.setMaximumIterations(m_config.icp_max_iterations);
     m_icp.setMaxCorrespondenceDistance(m_config.icp_max_distance);
-    m_icp.setTransformationEpsilon(1e-6);
-    m_icp.setEuclideanFitnessEpsilon(1e-6);
+    m_icp.setTransformationEpsilon(m_config.icp_transformation_epsilon);
+    m_icp.setEuclideanFitnessEpsilon(m_config.icp_euclidean_fitness_epsilon);
     m_icp.setRANSACIterations(0);
+
+    m_key_pose_cloud = std::make_shared<pcl::PointCloud<pcl::PointXYZ>>();
+    resetKeyPoseKdTree();
 }
 
 bool SimplePGO::isKeyPose(const PoseWithTime &pose)
@@ -63,24 +67,42 @@ bool SimplePGO::addKeyPose(const CloudWithPose &cloud_with_pose)
     item.r_global = init_r;
     item.t_global = init_t;
     m_key_poses.push_back(item);
+    m_kdtree_dirty = true;
+    m_new_key_poses_since_rebuild++;
+    invalidateSubmapCache();
     return true;
 }
 
 CloudType::Ptr SimplePGO::getSubMap(int idx, int half_range, double resolution)
 {
     assert(idx >= 0 && idx < static_cast<int>(m_key_poses.size()));
-    int min_idx = std::max(0, idx - half_range);
-    int max_idx = std::min(static_cast<int>(m_key_poses.size()) - 1, idx + half_range);
+    int clamped_half = clampHalfRange(half_range, m_key_poses.size());
+    int min_idx = std::max(0, idx - clamped_half);
+    int max_idx = std::min(static_cast<int>(m_key_poses.size()) - 1, idx + clamped_half);
+
+    SubmapCacheKey key{idx, clamped_half, quantizeResolution(resolution)};
+
+    if (m_config.submap_cache_size > 0)
+    {
+        auto cache_it = m_submap_cache.find(key);
+        if (cache_it != m_submap_cache.end())
+        {
+            // LRU更新：将命中条目挪到链表头部
+            m_submap_lru.splice(m_submap_lru.begin(), m_submap_lru, cache_it->second.lru_it);
+            cache_it->second.lru_it = m_submap_lru.begin();
+            return cache_it->second.cloud;
+        }
+    }
 
     CloudType::Ptr ret(new CloudType);
     for (int i = min_idx; i <= max_idx; i++)
     {
-
         CloudType::Ptr body_cloud = m_key_poses[i].body_cloud;
         CloudType::Ptr global_cloud(new CloudType);
         pcl::transformPointCloud(*body_cloud, *global_cloud, m_key_poses[i].t_global, Eigen::Quaterniond(m_key_poses[i].r_global));
         *ret += *global_cloud;
     }
+
     if (resolution > 0)
     {
         pcl::VoxelGrid<PointType> voxel_grid;
@@ -88,6 +110,21 @@ CloudType::Ptr SimplePGO::getSubMap(int idx, int half_range, double resolution)
         voxel_grid.setInputCloud(ret);
         voxel_grid.filter(*ret);
     }
+
+    if (m_config.submap_cache_size > 0)
+    {
+        m_submap_lru.push_front(key);
+        auto lru_it = m_submap_lru.begin();
+        m_submap_cache.emplace(key, SubmapCacheEntry{ret, lru_it});
+
+        while (m_submap_cache.size() > m_config.submap_cache_size)
+        {
+            const SubmapCacheKey& evict_key = m_submap_lru.back();
+            m_submap_cache.erase(evict_key);
+            m_submap_lru.pop_back();
+        }
+    }
+
     return ret;
 }
 
@@ -113,20 +150,13 @@ void SimplePGO::searchForLoopPairs()
     last_pose_pt.y = last_item.t_global(1);
     last_pose_pt.z = last_item.t_global(2);
 
-    pcl::PointCloud<pcl::PointXYZ>::Ptr key_poses_cloud(new pcl::PointCloud<pcl::PointXYZ>);
-    for (size_t i = 0; i < m_key_poses.size() - 1; i++)
-    {
-        pcl::PointXYZ pt;
-        pt.x = m_key_poses[i].t_global(0);
-        pt.y = m_key_poses[i].t_global(1);
-        pt.z = m_key_poses[i].t_global(2);
-        key_poses_cloud->push_back(pt);
-    }
-    pcl::KdTreeFLANN<pcl::PointXYZ> kdtree;
-    kdtree.setInputCloud(key_poses_cloud);
+    updateKeyPoseKdTree(cur_idx);
+    if (m_key_pose_cloud->empty())
+        return;
+
     std::vector<int> ids;
     std::vector<float> sqdists;
-    int neighbors = kdtree.radiusSearch(last_pose_pt, m_config.loop_search_radius, ids, sqdists);
+    int neighbors = m_key_pose_kdtree.radiusSearch(last_pose_pt, m_config.loop_search_radius, ids, sqdists);
     if (neighbors == 0)
         return;
 
@@ -135,7 +165,9 @@ void SimplePGO::searchForLoopPairs()
     cand_idxs.reserve(ids.size());
     for (size_t i = 0; i < ids.size(); ++i)
     {
-        int idx = ids[i];
+        int kd_index = ids[i];
+        if (kd_index < 0 || static_cast<size_t>(kd_index) >= m_kdtree_index_map.size()) continue;
+        int idx = m_kdtree_index_map[kd_index];
         if (idx < 0 || idx >= static_cast<int>(m_key_poses.size()-1)) continue;
         if (static_cast<int>(cur_idx) - idx < m_config.min_index_separation) continue; // 索引间隔
         if (std::abs(last_item.time - m_key_poses[idx].time) <= m_config.loop_time_tresh) continue; // 时间隔离
@@ -151,7 +183,6 @@ void SimplePGO::searchForLoopPairs()
     double best_score = std::numeric_limits<double>::infinity();
     int best_idx = -1;
     M4F best_tf = M4F::Identity();
-    double best_inlier_ratio = 0.0;
 
     for (int loop_idx : cand_idxs)
     {
@@ -181,7 +212,6 @@ void SimplePGO::searchForLoopPairs()
             best_score = combined;
             best_idx = loop_idx;
             best_tf = m_icp.getFinalTransformation();
-            best_inlier_ratio = inlier_ratio;
         }
     }
 
@@ -201,7 +231,7 @@ void SimplePGO::searchForLoopPairs()
     recordRecentPair(one_pair.target_id, one_pair.source_id);
 }
 
-void SimplePGO::smoothAndUpdate()
+bool SimplePGO::smoothAndUpdate()
 {
     bool has_loop = !m_cache_pairs.empty();
     // 添加回环因子
@@ -241,6 +271,10 @@ void SimplePGO::smoothAndUpdate()
     const KeyPoseWithCloud &last_item = m_key_poses.back();
     m_r_offset = last_item.r_global * last_item.r_local.transpose();
     m_t_offset = last_item.t_global - m_r_offset * last_item.t_local;
+    m_kdtree_dirty = true;
+    resetKeyPoseKdTree();
+    invalidateSubmapCache();
+    return has_loop;
 }
 
 bool SimplePGO::isRecentPair(size_t a, size_t b) const
@@ -286,4 +320,131 @@ double SimplePGO::computeInlierRatio(const CloudType::Ptr& src_aligned,
         }
     }
     return static_cast<double>(inliers) / static_cast<double>(src_aligned->size());
+}
+
+void SimplePGO::updateKeyPoseKdTree(size_t current_idx)
+{
+    if (m_key_poses.size() <= 1)
+    {
+        resetKeyPoseKdTree();
+        return;
+    }
+
+    size_t target_count = m_key_poses.size() - 1; // 不包含当前帧
+    if (m_kdtree_populated_count > target_count)
+    {
+        resetKeyPoseKdTree();
+    }
+
+    bool need_rebuild = m_kdtree_dirty || m_key_pose_cloud->empty() || (m_kdtree_populated_count == 0);
+    if (!need_rebuild)
+    {
+        if (m_new_key_poses_since_rebuild >= static_cast<size_t>(m_config.loop_kdtree_update_batch))
+        {
+            need_rebuild = true;
+        }
+        else if (current_idx >= static_cast<size_t>(m_config.min_index_separation))
+        {
+            size_t required_index = current_idx - static_cast<size_t>(m_config.min_index_separation);
+            if (m_kdtree_populated_count <= required_index)
+            {
+                need_rebuild = true;
+            }
+        }
+    }
+
+    if (!need_rebuild)
+    {
+        return;
+    }
+
+    m_key_pose_cloud->clear();
+    m_kdtree_index_map.clear();
+    m_key_pose_cloud->reserve(target_count);
+    m_kdtree_index_map.reserve(target_count);
+
+    for (size_t i = 0; i < target_count; ++i)
+    {
+        pcl::PointXYZ pt;
+        pt.x = m_key_poses[i].t_global(0);
+        pt.y = m_key_poses[i].t_global(1);
+        pt.z = m_key_poses[i].t_global(2);
+        m_key_pose_cloud->push_back(pt);
+        m_kdtree_index_map.push_back(static_cast<int>(i));
+    }
+
+    m_key_pose_kdtree.setInputCloud(m_key_pose_cloud);
+    m_kdtree_populated_count = target_count;
+    m_new_key_poses_since_rebuild = 0;
+    m_kdtree_dirty = false;
+}
+
+void SimplePGO::resetKeyPoseKdTree()
+{
+    if (!m_key_pose_cloud)
+    {
+        m_key_pose_cloud = std::make_shared<pcl::PointCloud<pcl::PointXYZ>>();
+    }
+    m_key_pose_cloud->clear();
+    m_kdtree_index_map.clear();
+    m_key_pose_kdtree.setInputCloud(m_key_pose_cloud);
+    m_kdtree_populated_count = 0;
+    m_new_key_poses_since_rebuild = 0;
+    m_kdtree_dirty = false;
+}
+
+void SimplePGO::invalidateSubmapCache()
+{
+    m_submap_cache.clear();
+    m_submap_lru.clear();
+}
+
+int SimplePGO::quantizeResolution(double resolution) const
+{
+    double res = std::max(0.0, resolution);
+    return static_cast<int>(std::round(res * 1000.0));
+}
+
+int SimplePGO::clampHalfRange(int half_range, size_t pose_count)
+{
+    if (half_range <= 0 || pose_count <= 1)
+    {
+        return 0;
+    }
+    int max_allowed = static_cast<int>(pose_count) - 1;
+    if (max_allowed < 0)
+    {
+        return 0;
+    }
+    return std::min(half_range, max_allowed);
+}
+
+void SimplePGO::applyOptimizedPoses(const std::vector<size_t>& indices, const std::vector<PoseUpdate>& poses)
+{
+    if (indices.size() != poses.size())
+    {
+        return;
+    }
+
+    for (size_t i = 0; i < indices.size(); ++i)
+    {
+        size_t idx = indices[i];
+        if (idx >= m_key_poses.size())
+        {
+            continue;
+        }
+        m_key_poses[idx].r_global = poses[i].r;
+        m_key_poses[idx].t_global = poses[i].t;
+    }
+
+    if (!m_key_poses.empty())
+    {
+        const KeyPoseWithCloud &last_item = m_key_poses.back();
+        m_r_offset = last_item.r_global * last_item.r_local.transpose();
+        m_t_offset = last_item.t_global - m_r_offset * last_item.t_local;
+    }
+
+    m_kdtree_dirty = true;
+    resetKeyPoseKdTree();
+    invalidateSubmapCache();
 }

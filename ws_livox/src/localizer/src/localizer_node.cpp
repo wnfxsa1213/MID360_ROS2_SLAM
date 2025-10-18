@@ -350,22 +350,17 @@ public:
         float roll = request->roll;
         float pitch = request->pitch;
 
-        if (!std::filesystem::exists(pcd_path))
-        {
-            response->success = false;
-            response->message = "pcd file not found";
-            return;
-        }
-
         Eigen::AngleAxisd yaw_angle = Eigen::AngleAxisd(yaw, Eigen::Vector3d::UnitZ());
         Eigen::AngleAxisd roll_angle = Eigen::AngleAxisd(roll, Eigen::Vector3d::UnitX());
         Eigen::AngleAxisd pitch_angle = Eigen::AngleAxisd(pitch, Eigen::Vector3d::UnitY());
-        bool load_flag = m_localizer->loadMap(pcd_path);
-        if (!load_flag)
-        {
-            response->success = false;
-            response->message = "load map failed";
-            return;
+        if (!pcd_path.empty()) {
+            bool load_flag = m_localizer->loadMap(pcd_path);
+            if (!load_flag)
+            {
+                response->success = false;
+                response->message = "load map failed";
+                return;
+            }
         }
         {
             std::lock_guard<std::mutex>(m_state.message_mutex);
@@ -376,9 +371,26 @@ public:
             m_state.localize_success = false;
         }
 
+        if (!m_localizer->align(m_state.initial_guess)) {
+            response->success = false;
+            response->message = "ICP align failed";
+            return;
+        }
+
+        geometry_msgs::msg::Pose pose_msg;
+        Eigen::Matrix4f result = m_state.initial_guess;
+        Eigen::Quaternionf q(result.block<3,3>(0,0));
+        pose_msg.position.x = result(0,3);
+        pose_msg.position.y = result(1,3);
+        pose_msg.position.z = result(2,3);
+        pose_msg.orientation.w = q.w();
+        pose_msg.orientation.x = q.x();
+        pose_msg.orientation.y = q.y();
+        pose_msg.orientation.z = q.z();
+
         response->success = true;
         response->message = "relocalize success";
-        return;
+        response->refined_pose = pose_msg;
     }
 
     void relocCheckCB(const std::shared_ptr<interface::srv::IsValid::Request> request, std::shared_ptr<interface::srv::IsValid::Response> response)

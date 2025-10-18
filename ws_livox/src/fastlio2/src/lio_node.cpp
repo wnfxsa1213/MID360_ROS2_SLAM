@@ -663,9 +663,15 @@ public:
             trajectory_file << "# MID360 SLAM轨迹数据\n";
             trajectory_file << "# 坐标系: " << m_node_config.world_frame << "\n";
             
+            nav_msgs::msg::Path path_snapshot;
+            {
+                std::lock_guard<std::mutex> lock(m_state_data.path_mutex);
+                path_snapshot = m_state_data.path;
+            }
+
             // 保存轨迹点
             size_t pose_count = 0;
-            for (const auto& pose : m_state_data.path.poses) {
+            for (const auto& pose : path_snapshot.poses) {
                 double timestamp = pose.header.stamp.sec + pose.header.stamp.nanosec * 1e-9;
                 trajectory_file << std::fixed << std::setprecision(6) << timestamp << " "
                                << std::setprecision(6) << pose.pose.position.x << " "

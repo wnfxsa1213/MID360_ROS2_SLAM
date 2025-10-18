@@ -13,11 +13,13 @@
 #include <Eigen/Geometry>
 #include <sensor_msgs/msg/point_cloud2.hpp>
 #include <pcl_conversions/pcl_conversions.h>
+#include <unordered_set>
 
 #include <geometry_msgs/msg/pose_array.hpp>
 
 #include "interface/srv/refine_map.hpp"
 #include "interface/srv/save_poses.hpp"
+#include "interface/srv/incremental_refine.hpp"
 
 using namespace std::chrono_literals;
 void fromStr(const std::string &str, std::string &file_name, Pose &pose)
@@ -55,6 +57,9 @@ public:
         m_save_poses_srv = this->create_service<interface::srv::SavePoses>(
             "hba/save_poses",
             std::bind(&HBANode::savePosesCB, this, std::placeholders::_1, std::placeholders::_2));
+        m_incremental_refine_srv = this->create_service<interface::srv::IncrementalRefine>(
+            "hba/incremental_refine",
+            std::bind(&HBANode::incrementalRefineCB, this, std::placeholders::_1, std::placeholders::_2));
         m_cloud_pub = this->create_publisher<sensor_msgs::msg::PointCloud2>("hba/map_points", 10);
     }
 
@@ -93,6 +98,8 @@ public:
                 response->message = "maps_path not exists";
                 return;
             }
+
+            m_loaded_keyframes.clear();
 
             std::filesystem::path p_dir(request->maps_path);
             std::filesystem::path pcd_dir = p_dir / "patches";
@@ -187,6 +194,100 @@ public:
         }
     }
 
+    void incrementalRefineCB(const std::shared_ptr<interface::srv::IncrementalRefine::Request> request,
+                             std::shared_ptr<interface::srv::IncrementalRefine::Response> response)
+    {
+        std::lock_guard<std::mutex> lock(m_service_mutex);
+        try {
+            const size_t pose_count = request->keyframe_poses.poses.size();
+            if (pose_count == 0) {
+                response->success = false;
+                response->message = "request contains no keyframes";
+                return;
+            }
+
+            if (pose_count != request->keyframe_clouds.size() ||
+                pose_count != request->keyframe_indices.size()) {
+                response->success = false;
+                response->message = "poses, clouds and indices size mismatch";
+                return;
+            }
+
+            if (request->reset) {
+                m_hba->reset();
+                m_loaded_keyframes.clear();
+            }
+
+            size_t inserted_frames = 0;
+            for (size_t idx = 0; idx < pose_count; ++idx) {
+                int32_t keyframe_id = request->keyframe_indices[idx];
+                if (!request->reset && m_loaded_keyframes.count(keyframe_id) > 0) {
+                    continue;
+                }
+
+                Pose pose = fromGeometryPose(request->keyframe_poses.poses[idx]);
+                pcl::PointCloud<pcl::PointXYZI>::Ptr cloud(new pcl::PointCloud<pcl::PointXYZI>);
+                pcl::fromROSMsg(request->keyframe_clouds[idx], *cloud);
+                m_voxel_grid.setInputCloud(cloud);
+                m_voxel_grid.filter(*cloud);
+                m_hba->insert(cloud, pose);
+                m_loaded_keyframes.insert(keyframe_id);
+                inserted_frames++;
+            }
+
+            if (m_hba->poses().empty()) {
+                response->success = false;
+                response->message = "HBA holds no keyframes";
+                return;
+            }
+
+            if (inserted_frames == 0 && !request->run_optimization) {
+                response->optimized_poses = buildPoseArray(m_hba->poses());
+                response->pose_covariances.clear();
+                response->iterations_used = 0;
+                response->final_residual = 0.0;
+                response->success = true;
+                response->message = "no new keyframes provided";
+                return;
+            }
+
+            Vec<Pose> initial_poses = m_hba->poses();
+            int iterations_target = request->max_iterations > 0 ? request->max_iterations : static_cast<int>(m_hba_config.hba_iter);
+            iterations_target = std::max(iterations_target, 0);
+            int iterations_used = 0;
+            std::vector<double> translation_errors;
+            std::vector<double> rotation_errors;
+            double final_residual = 0.0;
+
+            if (request->run_optimization && iterations_target > 0) {
+                for (int iter = 0; iter < iterations_target; ++iter) {
+                    m_hba->optimize();
+                    iterations_used++;
+                }
+                final_residual = computePoseResiduals(initial_poses, m_hba->poses(),
+                                                      translation_errors, rotation_errors);
+            } else {
+                translation_errors.assign(m_hba->poses().size(), 0.0);
+                rotation_errors.assign(m_hba->poses().size(), 0.0);
+            }
+
+            response->optimized_poses = buildPoseArray(m_hba->poses());
+            response->pose_covariances = buildPoseCovariances(translation_errors, rotation_errors);
+            response->iterations_used = iterations_used;
+            response->final_residual = final_residual;
+            response->success = true;
+            response->message = request->run_optimization ? "HBA incremental refinement completed" : "HBA keyframes updated";
+
+            if (request->run_optimization && iterations_used > 0) {
+                publishMap();
+            }
+        } catch (const std::exception &e) {
+            response->success = false;
+            response->message = std::string("Incremental refine exception: ") + e.what();
+            RCLCPP_ERROR(this->get_logger(), "Incremental refine exception: %s", e.what());
+        }
+    }
+
     void savePosesCB(const std::shared_ptr<interface::srv::SavePoses::Request> request, std::shared_ptr<interface::srv::SavePoses::Response> response)
     {
         std::lock_guard<std::mutex> lock(m_service_mutex);
@@ -241,6 +342,18 @@ public:
         ros_pose.orientation.y = q.y();
         ros_pose.orientation.z = q.z();
         return ros_pose;
+    }
+
+    Pose fromGeometryPose(const geometry_msgs::msg::Pose &ros_pose) const
+    {
+        Pose pose;
+        pose.t = V3D(ros_pose.position.x, ros_pose.position.y, ros_pose.position.z);
+        Eigen::Quaterniond q(ros_pose.orientation.w,
+                             ros_pose.orientation.x,
+                             ros_pose.orientation.y,
+                             ros_pose.orientation.z);
+        pose.r = q.normalized().toRotationMatrix();
+        return pose;
     }
 
     std::vector<double> buildPoseCovariances(const std::vector<double> &translation_errors,
@@ -320,11 +433,13 @@ private:
     std::shared_ptr<HBA> m_hba;
     rclcpp::Service<interface::srv::RefineMap>::SharedPtr m_refine_map_srv;
     rclcpp::Service<interface::srv::SavePoses>::SharedPtr m_save_poses_srv;
+    rclcpp::Service<interface::srv::IncrementalRefine>::SharedPtr m_incremental_refine_srv;
 
     rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr m_cloud_pub;
 
     pcl::VoxelGrid<pcl::PointXYZI> m_voxel_grid;
     std::mutex m_service_mutex;
+    std::unordered_set<int32_t> m_loaded_keyframes;
 };
 
 int main(int argc, char **argv)

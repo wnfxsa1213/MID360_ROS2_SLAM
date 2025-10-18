@@ -305,7 +305,7 @@ void executeHBAOptimization(...)
 
 ### 🚨 PGO内存与数值稳定性
 
-#### ❌ #4 m_recent_added_pairs无限增长导致内存泄漏
+#### ✅ #4 m_recent_added_pairs无限增长导致内存泄漏 *(2025-10-18 已修复)*
 **位置**: [simple_pgo.h:78](ws_livox/src/pgo/src/pgos/simple_pgo.h#L78), [simple_pgo.cpp:201](ws_livox/src/pgo/src/pgos/simple_pgo.cpp#L201)
 **发现时间**: 后端优化模块审查
 **影响**: 🔴 **长时间运行内存溢出**
@@ -322,23 +322,18 @@ m_recent_added_pairs.emplace_back(one_pair.target_id, one_pair.source_id);
 - `isRecentPair()` O(N)遍历越来越慢
 - 极端场景可能OOM崩溃
 
-**修复方案** (2小时):
-```cpp
-// 方案1: LRU策略
-if (m_recent_added_pairs.size() > 1000) {
-    m_recent_added_pairs.erase(
-        m_recent_added_pairs.begin(),
-        m_recent_added_pairs.begin() + 500
-    );
-}
+**状态更新 (2025-10-18)**:
+- ws_livox/src/pgo/src/pgos/simple_pgo.h: 将 `m_recent_added_pairs` 换成 `std::deque`，并增加常量 `kRecentPairsCapacity = 1024`。
+- ws_livox/src/pgo/src/pgos/simple_pgo.cpp: 新增 `recordRecentPair()`，在追加时自动裁剪到 1024 条以内（溢出时保留后 512 条）。
+- 同文件 `searchForLoopPairs()` 使用新接口记录最近配对，`isRecentPair()` 仍可常数级访问。
+- 重新编译 `colcon build --packages-select pgo --symlink-install` 通过，确认无语法问题。
 
-// 方案2: 使用固定大小循环缓冲区
-#include <boost/circular_buffer.hpp>
-boost::circular_buffer<std::pair<size_t,size_t>> m_recent_added_pairs{500};
-```
+**剩余风险**:
+- `isRecentPair()` 仍为线性扫描（<=1024，成本可接受）；若未来需要支持更大规模，考虑换成无序集合。
+- 需要长时间回放验证，确保循环裁剪逻辑不会导致回环漏检（建议跑 `tools/slam_tools.sh start replay ...` 观察 30min+）。
 
-**工作量**: ⏱️ 2小时
-**优先级**: 🔴 **高**
+**工作量**: ⏱️ 2小时（已完成）
+**优先级**: 🔴 **已修复**
 
 ---
 

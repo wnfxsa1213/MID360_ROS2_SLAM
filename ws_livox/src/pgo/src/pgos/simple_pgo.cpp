@@ -198,7 +198,7 @@ void SimplePGO::searchForLoopPairs()
     one_pair.t_offset = m_key_poses[best_idx].r_global.transpose() * (t_refined - m_key_poses[best_idx].t_global);
     m_cache_pairs.push_back(one_pair);
     m_history_pairs.emplace_back(one_pair.target_id, one_pair.source_id);
-    m_recent_added_pairs.emplace_back(one_pair.target_id, one_pair.source_id);
+    recordRecentPair(one_pair.target_id, one_pair.source_id);
 }
 
 void SimplePGO::smoothAndUpdate()
@@ -252,6 +252,20 @@ bool SimplePGO::isRecentPair(size_t a, size_t b) const
             return true;
     }
     return false;
+}
+
+void SimplePGO::recordRecentPair(size_t a, size_t b)
+{
+    m_recent_added_pairs.emplace_back(a, b);
+    if (m_recent_added_pairs.size() > kRecentPairsCapacity)
+    {
+        size_t shrink_target = kRecentPairsCapacity / 2;
+        shrink_target = std::max<size_t>(shrink_target, 1);
+        while (m_recent_added_pairs.size() > shrink_target)
+        {
+            m_recent_added_pairs.pop_front();
+        }
+    }
 }
 
 double SimplePGO::computeInlierRatio(const CloudType::Ptr& src_aligned,

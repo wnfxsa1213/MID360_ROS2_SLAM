@@ -4,6 +4,7 @@
 #include <pcl/common/transforms.h>
 #include <pcl/filters/voxel_grid.h>
 #include <pcl/registration/icp.h>
+#include <deque>
 #include <gtsam/geometry/Rot3.h>
 #include <gtsam/geometry/Pose3.h>
 #include <gtsam/nonlinear/ISAM2.h>
@@ -75,7 +76,8 @@ private:
     std::vector<KeyPoseWithCloud> m_key_poses;
     std::vector<std::pair<size_t, size_t>> m_history_pairs;
     std::vector<LoopPair> m_cache_pairs;
-    std::vector<std::pair<size_t,size_t>> m_recent_added_pairs; // 约束去重辅助
+    std::deque<std::pair<size_t,size_t>> m_recent_added_pairs; // 约束去重辅助
+    static constexpr size_t kRecentPairsCapacity = 1024;
     M3D m_r_offset;
     V3D m_t_offset;
     std::shared_ptr<gtsam::ISAM2> m_isam2;
@@ -85,6 +87,7 @@ private:
 
     // 几何验证辅助
     bool isRecentPair(size_t a, size_t b) const;
+    void recordRecentPair(size_t a, size_t b);
     double computeInlierRatio(const CloudType::Ptr& src_aligned,
                               const CloudType::Ptr& tgt,
                               double dist_thresh) const;

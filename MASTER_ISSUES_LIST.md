@@ -130,6 +130,87 @@ HBA优化(3-10分钟)
 
 **修复方案** (3小时):
 
+**状态更新 (2025-10-18 已完成)**:
+✅ **完整修复已实施，HBA 现已完全集成到协同优化流程**
+
+**修复详情**:
+
+1. **服务接口扩展** - `ws_livox/src/interface/srv/RefineMap.srv`:
+   ```diff
+   + geometry_msgs/PoseArray optimized_poses    # 优化后的完整轨迹
+   + float64[] pose_covariances                 # 位姿协方差矩阵
+   + int32 iterations_used                      # 迭代次数
+   + float64 final_residual                     # 最终残差
+   ```
+
+2. **HBA 节点改造** - `ws_livox/src/hba/src/hba_node.cpp`:
+   - ✅ 服务回调中同步执行 HBA 优化
+   - ✅ 构造 `PoseArray` 返回优化轨迹
+   - ✅ 计算协方差矩阵并返回
+   - ✅ 返回迭代次数和最终残差
+   - ✅ 优化成功后自动发布优化后的地图点云
+
+3. **HBA 核心类改进** - `ws_livox/src/hba/src/hba/hba.{h,cpp}`:
+   - ✅ 新增 `reset()` 方法，避免多次请求叠加旧帧导致数据脏污
+   - ✅ 清理 `m_keyframes` 和 `m_patches` 容器
+
+4. **协调器集成** - `ws_livox/src/cooperation/src/optimization_coordinator.cpp`:
+   - ✅ 接收 HBA 新响应数据
+   - ✅ 将最终优化位姿（含协方差）反馈给 FAST-LIO2
+   - ✅ 使用全轨迹同步协同状态
+   - ✅ 完整的错误处理和日志记录
+
+**数据流修复后**:
+```
+PGO → 保存地图到文件
+       ↓
+HBA ← 从文件读取
+       ↓
+HBA优化(3-10分钟)
+       ↓
+✅ 返回优化位姿 + 协方差 + 残差
+       ↓
+✅ 协调器接收并反馈给 FAST-LIO2
+       ↓
+✅ FAST-LIO2 更新状态
+       ↓
+✅ 发布优化后的地图点云
+```
+
+**验证方法**:
+```bash
+# 1. 触发 HBA 优化
+ros2 service call /cooperation/trigger_optimization \
+  interface/srv/TriggerOptimization \
+  "{optimization_type: 'hba', parameters: ['max_iterations:50']}"
+
+# 2. 监控协同状态
+ros2 topic echo /fastlio2/cooperation_status
+
+# 3. 检查地图发布
+ros2 topic echo /hba/optimized_map
+
+# 预期:
+# - HBA 返回完整轨迹和协方差
+# - FAST-LIO2 接收到优化结果
+# - 发布优化后的点云地图
+```
+
+**修复前后对比**:
+
+| 指标 | 修复前 | 修复后 |
+|-----|--------|--------|
+| **数据输出** | ❌ 仅返回 bool | ✅ 返回完整轨迹 + 协方差 + 残差 |
+| **FAST-LIO2 集成** | ❌ 完全孤立 | ✅ 自动反馈优化结果 |
+| **地图发布** | ❌ 无 | ✅ 自动发布优化地图 |
+| **协同优化** | ❌ 不参与 | ✅ 完全集成 |
+| **数据重用** | ❌ 多次请求数据脏 | ✅ reset() 清理 |
+
+**工作量**: ⏱️ ~3小时（已完成）
+**优先级**: 🔴 **已修复 - 核心功能恢复**
+
+**原修复方案** (作为参考):
+
 1. **修改服务定义**:
 ```protobuf
 # RefineMap.srv

@@ -3,6 +3,10 @@
 #include <geometry_msgs/msg/pose_array.hpp>
 #include <geometry_msgs/msg/pose_with_covariance.hpp>
 #include <std_msgs/msg/float64_multi_array.hpp>
+#include <diagnostic_msgs/msg/diagnostic_array.hpp>
+#include <diagnostic_msgs/msg/diagnostic_status.hpp>
+#include <diagnostic_msgs/msg/key_value.hpp>
+#include "interface/msg/system_performance.hpp"
 #include "interface/srv/update_pose.hpp"
 #include "interface/srv/sync_state.hpp"
 #include "interface/srv/trigger_optimization.hpp"
@@ -11,6 +15,8 @@
 #include "interface/srv/relocalize.hpp"
 #include "interface/srv/is_valid.hpp"
 #include <algorithm>
+#include <chrono>
+#include <cstdint>
 #include <queue>
 #include <mutex>
 #include <thread>
@@ -18,7 +24,11 @@
 #include <cmath>
 #include <deque>
 #include <numeric>
+#include <fstream>
+#include <sys/resource.h>
+#include <unistd.h>
 #include <Eigen/Geometry>
+#include <atomic>
 
 using namespace std::chrono_literals;
 
@@ -97,7 +107,9 @@ private:
         double relocalization_timeout_sec = 10.0;
         double relocalization_min_translation = 0.5;
         double relocalization_min_yaw = 5.0; // degrees
-        double client_timeout_sec = 3.0;
+        int service_timeout_ms = 3000;
+        int emergency_failure_threshold = 3;
+        std::string hba_maps_path = "/tmp/current_map.pcd";
     } m_config;
 
     // 客户端和服务
@@ -116,6 +128,8 @@ private:
 
     // 发布者
     rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr m_coordination_pub;
+    rclcpp::Publisher<diagnostic_msgs::msg::DiagnosticArray>::SharedPtr m_health_pub;
+    rclcpp::Publisher<interface::msg::SystemPerformance>::SharedPtr m_performance_pub;
 
     // 定时器
     rclcpp::TimerBase::SharedPtr m_monitor_timer;
@@ -129,9 +143,14 @@ private:
     mutable std::mutex m_queue_mutex;
     mutable std::mutex m_metrics_mutex;
     mutable std::mutex m_pose_mutex;
+    std::atomic<bool> m_pending_emergency{false};
 
     geometry_msgs::msg::Pose m_last_pose;
     geometry_msgs::msg::Pose m_reference_pose;
+    double m_last_cpu_total = 0.0;
+    double m_last_cpu_usage = 0.0;
+    rclcpp::Time m_last_cpu_sample;
+    long m_cpu_cores = 1;
 
     void loadConfiguration()
     {
@@ -148,7 +167,9 @@ private:
         this->declare_parameter("relocalization_timeout_sec", m_config.relocalization_timeout_sec);
         this->declare_parameter("relocalization_min_translation", m_config.relocalization_min_translation);
         this->declare_parameter("relocalization_min_yaw", m_config.relocalization_min_yaw);
-        this->declare_parameter("client_timeout_sec", m_config.client_timeout_sec);
+        this->declare_parameter("service_timeout_ms", m_config.service_timeout_ms);
+        this->declare_parameter("emergency_failure_threshold", m_config.emergency_failure_threshold);
+        this->declare_parameter("hba_maps_path", m_config.hba_maps_path);
 
         m_config.drift_threshold = this->get_parameter("drift_threshold").as_double();
         m_config.time_threshold = this->get_parameter("time_threshold").as_double();
@@ -163,7 +184,14 @@ private:
         m_config.relocalization_timeout_sec = this->get_parameter("relocalization_timeout_sec").as_double();
         m_config.relocalization_min_translation = this->get_parameter("relocalization_min_translation").as_double();
         m_config.relocalization_min_yaw = this->get_parameter("relocalization_min_yaw").as_double();
-        m_config.client_timeout_sec = this->get_parameter("client_timeout_sec").as_double();
+        auto timeout_param = this->get_parameter("service_timeout_ms").as_int();
+        m_config.service_timeout_ms = static_cast<int>(std::max<int64_t>(0, timeout_param));
+        int failure_threshold = static_cast<int>(this->get_parameter("emergency_failure_threshold").as_int());
+        m_config.emergency_failure_threshold = std::max(1, failure_threshold);
+        m_config.hba_maps_path = this->get_parameter("hba_maps_path").as_string();
+        if (m_config.hba_maps_path.empty()) {
+            m_config.hba_maps_path = "/tmp/current_map.pcd";
+        }
 
         RCLCPP_INFO(this->get_logger(), "配置加载: 漂移阈值=%.2fm, 时间阈值=%.1fs",
                    m_config.drift_threshold, m_config.time_threshold);
@@ -201,6 +229,13 @@ private:
 
         m_coordination_pub = this->create_publisher<std_msgs::msg::Float64MultiArray>(
             "/coordinator/metrics", 10);
+        m_health_pub = this->create_publisher<diagnostic_msgs::msg::DiagnosticArray>(
+            "/coordinator/health", 10);
+        m_performance_pub = this->create_publisher<interface::msg::SystemPerformance>(
+            "/coordinator/system_performance", 10);
+
+        m_cpu_cores = std::max<long>(1, sysconf(_SC_NPROCESSORS_ONLN));
+        m_last_cpu_sample = this->get_clock()->now();
     }
 
     // 核心监控逻辑
@@ -240,7 +275,12 @@ private:
     bool shouldTriggerEmergencyOptimization()
     {
         std::lock_guard<std::mutex> lock(m_metrics_mutex);
-        return m_metrics.cumulative_drift > m_config.emergency_threshold;
+        if (m_metrics.optimization_in_progress) {
+            return false;
+        }
+        bool drift_critical = m_metrics.cumulative_drift > m_config.emergency_threshold;
+        bool failure_exceeded = m_metrics.failed_optimizations >= m_config.emergency_failure_threshold;
+        return drift_critical && failure_exceeded;
     }
 
     bool shouldTriggerRegularOptimization(rclcpp::Time now)
@@ -322,13 +362,14 @@ private:
     bool tryAcquireOptimization(const OptimizationTask& task)
     {
         std::lock_guard<std::mutex> lock(m_metrics_mutex);
-        if (m_metrics.optimization_in_progress && !task.emergency) {
-            return false;
-        }
-        if (m_metrics.optimization_in_progress && task.emergency) {
+        if (m_metrics.optimization_in_progress) {
+            if (task.emergency) {
+                m_pending_emergency.store(true, std::memory_order_relaxed);
+            }
             return false;
         }
         m_metrics.optimization_in_progress = true;
+        m_pending_emergency.store(false, std::memory_order_relaxed);
         return true;
     }
 
@@ -357,7 +398,7 @@ private:
         RCLCPP_INFO(this->get_logger(), "🔄 执行PGO优化...");
 
         // 主动查询PGO优化结果（关键帧优化位姿与轨迹）
-        auto timeout = std::chrono::duration<double>(m_config.client_timeout_sec);
+        auto timeout = serviceWaitTimeout();
         if (!m_pgo_status_client->wait_for_service(timeout)) {
             RCLCPP_WARN(this->get_logger(), "PGO状态服务不可用，进行被动同步");
             requestStateSync("pgo_node", 0);
@@ -366,54 +407,56 @@ private:
         }
 
         auto req = std::make_shared<interface::srv::GetOptimizedPose::Request>();
-        try {
-            geometry_msgs::msg::Pose pre_pose;
-            {
-                std::lock_guard<std::mutex> lock(m_pose_mutex);
-                pre_pose = m_last_pose;
-            }
-            auto future = m_pgo_status_client->async_send_request(req);
-            auto resp = future.get();
-            if (resp && resp->success) {
-                double rotation_deg = 0.0;
-                double translation = calculatePoseDelta(pre_pose, resp->optimized_pose.pose, rotation_deg);
-                if (resp->optimization_score < m_config.optimization_score_threshold &&
-                    translation < m_config.min_pose_delta &&
-                    rotation_deg < m_config.min_orientation_delta_deg) {
-                    RCLCPP_WARN(this->get_logger(),
-                                "PGO optimization rejected: delta %.4fm, rotation %.3fdeg, score %.3f",
-                                translation, rotation_deg, resp->optimization_score);
+        geometry_msgs::msg::Pose pre_pose;
+        {
+            std::lock_guard<std::mutex> lock(m_pose_mutex);
+            pre_pose = m_last_pose;
+        }
+
+        auto callback = [this, pre_pose](rclcpp::Client<interface::srv::GetOptimizedPose>::SharedFuture result) {
+            try {
+                auto resp = result.get();
+                if (resp && resp->success) {
+                    double rotation_deg = 0.0;
+                    double translation = calculatePoseDelta(pre_pose, resp->optimized_pose.pose, rotation_deg);
+                    if (resp->optimization_score < m_config.optimization_score_threshold &&
+                        translation < m_config.min_pose_delta &&
+                        rotation_deg < m_config.min_orientation_delta_deg) {
+                        RCLCPP_WARN(this->get_logger(),
+                                    "PGO optimization rejected: delta %.4fm, rotation %.3fdeg, score %.3f",
+                                    translation, rotation_deg, resp->optimization_score);
+                        requestStateSync("pgo_node", 0);
+                        finalizeOptimization(false);
+                        return;
+                    }
+
+                    // 将优化位姿回写至FAST-LIO2（平滑更新）
+                    pushUpdatePoseToLIO(resp->optimized_pose, resp->optimization_score, "pgo_node");
+
+                    // 向FAST-LIO2同步轨迹（便于内部状态/可视化对齐）
+                    pushSyncStateToLIO("pgo_node", 0, resp->optimized_trajectory);
+
+                    finalizeOptimization(true);
+                } else {
+                    RCLCPP_WARN(this->get_logger(), "PGO结果无效，进行被动同步");
                     requestStateSync("pgo_node", 0);
                     finalizeOptimization(false);
-                    return;
                 }
-
-                // 将优化位姿回写至FAST-LIO2（平滑更新）
-                pushUpdatePoseToLIO(resp->optimized_pose, resp->optimization_score, "pgo_node");
-
-                // 向FAST-LIO2同步轨迹（便于内部状态/可视化对齐）
-                pushSyncStateToLIO("pgo_node", 0, resp->optimized_trajectory);
-
-                finalizeOptimization(true);
-                return;
-            } else {
-                RCLCPP_WARN(this->get_logger(), "PGO结果无效，进行被动同步");
+            } catch (const std::exception& e) {
+                RCLCPP_ERROR(this->get_logger(), "PGO优化查询异常: %s", e.what());
                 requestStateSync("pgo_node", 0);
                 finalizeOptimization(false);
-                return;
             }
-        } catch (const std::exception& e) {
-            RCLCPP_ERROR(this->get_logger(), "PGO优化查询异常: %s", e.what());
-            requestStateSync("pgo_node", 0);
-            finalizeOptimization(false);
-            return;
-        }
+        };
+
+        m_pgo_status_client->async_send_request(req, callback);
     }
 
     void executeHBAOptimization(const OptimizationTask& /*task*/)
     {
         RCLCPP_INFO(this->get_logger(), "🔧 执行HBA精细化...");
 
+        auto timeout = serviceWaitTimeout();
         if (!m_hba_client->wait_for_service(timeout)) {
             RCLCPP_ERROR(this->get_logger(), "HBA服务不可用");
             finalizeOptimization(false);
@@ -421,45 +464,44 @@ private:
         }
 
         auto request = std::make_shared<interface::srv::RefineMap::Request>();
-        request->maps_path = "/tmp/current_map.pcd";
+        request->maps_path = m_config.hba_maps_path;
 
-        // 同步调用简化处理
-        try {
-            auto future = m_hba_client->async_send_request(request);
-            auto response = future.get();
+        auto callback = [this](rclcpp::Client<interface::srv::RefineMap>::SharedFuture result) {
+            try {
+                auto response = result.get();
 
-            if (response->success) {
-                RCLCPP_INFO(this->get_logger(),
-                            "✅ HBA优化完成，迭代:%d，残差:%.6f",
-                            response->iterations_used,
-                            response->final_residual);
+                if (response->success) {
+                    RCLCPP_INFO(this->get_logger(),
+                                "✅ HBA优化完成，迭代:%d，残差:%.6f",
+                                response->iterations_used,
+                                response->final_residual);
 
-                if (!response->optimized_poses.poses.empty()) {
-                    auto pose_with_cov = extractPoseWithCovariance(
-                        response->optimized_poses,
-                        response->pose_covariances,
-                        response->optimized_poses.poses.size() - 1);
+                    if (!response->optimized_poses.poses.empty()) {
+                        auto pose_with_cov = extractPoseWithCovariance(
+                            response->optimized_poses,
+                            response->pose_covariances,
+                            response->optimized_poses.poses.size() - 1);
 
-                    double score = evaluateHBAScore(response->final_residual);
-                    pushUpdatePoseToLIO(pose_with_cov, score, "hba_node");
-                    pushSyncStateToLIO("hba_node", 1, response->optimized_poses);
+                        double score = evaluateHBAScore(response->final_residual);
+                        pushUpdatePoseToLIO(pose_with_cov, score, "hba_node");
+                        pushSyncStateToLIO("hba_node", 1, response->optimized_poses);
+                    } else {
+                        RCLCPP_WARN(this->get_logger(), "HBA返回的pose数组为空，跳过反馈");
+                    }
+
+                    requestStateSync("hba_node", 1);
+                    finalizeOptimization(true);
                 } else {
-                    RCLCPP_WARN(this->get_logger(), "HBA返回的pose数组为空，跳过反馈");
+                    RCLCPP_ERROR(this->get_logger(), "❌ HBA优化失败: %s", response->message.c_str());
+                    finalizeOptimization(false);
                 }
-
-                requestStateSync("hba_node", 1);
-                finalizeOptimization(true);
-                return;
-            } else {
-                RCLCPP_ERROR(this->get_logger(), "❌ HBA优化失败: %s", response->message.c_str());
+            } catch (const std::exception& e) {
+                RCLCPP_ERROR(this->get_logger(), "HBA优化异常: %s", e.what());
                 finalizeOptimization(false);
-                return;
             }
-        } catch (const std::exception& e) {
-            RCLCPP_ERROR(this->get_logger(), "HBA优化异常: %s", e.what());
-            finalizeOptimization(false);
-            return;
-        }
+        };
+
+        m_hba_client->async_send_request(request, callback);
     }
 
     void executeLocalizerOptimization(const OptimizationTask& /* task */)
@@ -515,6 +557,7 @@ private:
 
     void requestStateSync(const std::string& component, int opt_type)
     {
+        auto timeout = serviceWaitTimeout();
         if (!m_sync_client->wait_for_service(timeout)) {
             RCLCPP_WARN(this->get_logger(), "状态同步服务不可用");
             return;
@@ -524,25 +567,27 @@ private:
         request->component_name = component;
         request->optimization_type = opt_type;
 
-        // 同步调用状态同步
-        try {
-            auto future = m_sync_client->async_send_request(request);
-            auto response = future.get();
-
-            if (response->success) {
-                RCLCPP_INFO(this->get_logger(), "✅ 状态同步成功: %s", component.c_str());
-            } else {
-                RCLCPP_WARN(this->get_logger(), "⚠️ 状态同步失败: %s", response->message.c_str());
+        auto callback = [this, component](rclcpp::Client<interface::srv::SyncState>::SharedFuture future) {
+            try {
+                auto response = future.get();
+                if (response->success) {
+                    RCLCPP_INFO(this->get_logger(), "✅ 状态同步成功: %s", component.c_str());
+                } else {
+                    RCLCPP_WARN(this->get_logger(), "⚠️ 状态同步失败: %s", response->message.c_str());
+                }
+            } catch (const std::exception& e) {
+                RCLCPP_ERROR(this->get_logger(), "状态同步异常: %s", e.what());
             }
-        } catch (const std::exception& e) {
-            RCLCPP_ERROR(this->get_logger(), "状态同步异常: %s", e.what());
-        }
+        };
+
+        m_sync_client->async_send_request(request, callback);
     }
 
     void pushUpdatePoseToLIO(const geometry_msgs::msg::PoseWithCovariance& optimized_pose,
                               double score,
                               const std::string& source)
     {
+        auto timeout = serviceWaitTimeout();
         if (!m_fastlio_client->wait_for_service(timeout)) {
             RCLCPP_WARN(this->get_logger(), "FAST-LIO2位姿更新服务不可用");
             return;
@@ -553,17 +598,28 @@ private:
         req->reset_covariance = false;
         req->optimization_score = score;
         req->source_component = source;
-        try {
-            auto fut = m_fastlio_client->async_send_request(req);
-            (void)fut.get();
-        } catch (...) {
-        }
+        auto callback = [this, source](rclcpp::Client<interface::srv::UpdatePose>::SharedFuture future) {
+            try {
+                auto response = future.get();
+                if (!response->success) {
+                    RCLCPP_WARN(this->get_logger(),
+                                "FAST-LIO2拒绝位姿更新(来源:%s): %s",
+                                source.c_str(), response->message.c_str());
+                }
+            } catch (const std::exception& e) {
+                RCLCPP_ERROR(this->get_logger(),
+                             "FAST-LIO2位姿更新异常(来源:%s): %s",
+                             source.c_str(), e.what());
+            }
+        };
+        m_fastlio_client->async_send_request(req, callback);
     }
 
     void pushSyncStateToLIO(const std::string& component,
                             int opt_type,
                             const geometry_msgs::msg::PoseArray& traj)
     {
+        auto timeout = serviceWaitTimeout();
         if (!m_sync_client->wait_for_service(timeout)) {
             RCLCPP_WARN(this->get_logger(), "状态同步服务不可用");
             return;
@@ -573,24 +629,49 @@ private:
         req->optimization_type = opt_type;
         req->optimized_trajectory = traj;
         req->force_update = true;
-        try {
-            auto fut = m_sync_client->async_send_request(req);
-            (void)fut.get();
-        } catch (...) {
-        }
+
+        auto callback = [this, component](rclcpp::Client<interface::srv::SyncState>::SharedFuture future) {
+            try {
+                auto resp = future.get();
+                if (!resp->success) {
+                    RCLCPP_WARN(this->get_logger(),
+                                "FAST-LIO2状态同步失败: %s", resp->message.c_str());
+                }
+            } catch (const std::exception& e) {
+                RCLCPP_ERROR(this->get_logger(),
+                             "FAST-LIO2状态同步异常: %s", e.what());
+            }
+        };
+
+        m_sync_client->async_send_request(req, callback);
     }
 
     void finalizeOptimization(bool success)
     {
         auto now = this->get_clock()->now();
-        std::lock_guard<std::mutex> lock(m_metrics_mutex);
-        m_metrics.optimization_in_progress = false;
-        m_metrics.last_optimization_time = now;
-        if (success) {
-            m_metrics.successful_optimizations++;
-        } else {
-            m_metrics.failed_optimizations++;
+        bool had_pending_emergency = false;
+        {
+            std::lock_guard<std::mutex> lock(m_metrics_mutex);
+            m_metrics.optimization_in_progress = false;
+            m_metrics.last_optimization_time = now;
+            if (success) {
+                m_metrics.successful_optimizations++;
+            } else {
+                m_metrics.failed_optimizations++;
+            }
+            had_pending_emergency = m_pending_emergency.exchange(false, std::memory_order_relaxed);
         }
+
+        if (had_pending_emergency) {
+            RCLCPP_INFO(this->get_logger(), "⚡ 紧急优化请求抢占触发，立即调度");
+        }
+
+        processTaskQueue();
+    }
+
+    std::chrono::milliseconds serviceWaitTimeout() const
+    {
+        return std::chrono::milliseconds(std::max(0, m_config.service_timeout_ms));
     }
 
     // 回调函数
@@ -742,11 +823,140 @@ private:
         msg.data[7] = m_config.auto_optimization ? 1.0 : 0.0;
 
         m_coordination_pub->publish(msg);
+        publishComponentHealth(metrics_snapshot, queue_size);
+        if (m_performance_pub && m_performance_pub->get_subscription_count() > 0) {
+            m_performance_pub->publish(buildSystemPerformance(metrics_snapshot));
+        }
 
         RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 30000,
             "📊 协调器状态 - 漂移:%.3fm, 成功:%d, 失败:%d, 队列:%lu",
             metrics_snapshot.cumulative_drift, metrics_snapshot.successful_optimizations,
             metrics_snapshot.failed_optimizations, queue_size);
+    }
+
+    void publishComponentHealth(const SystemMetrics& metrics_snapshot, size_t queue_size)
+    {
+        if (!m_health_pub || m_health_pub->get_subscription_count() == 0) {
+            return;
+        }
+
+        diagnostic_msgs::msg::DiagnosticArray array_msg;
+        array_msg.header.stamp = this->get_clock()->now();
+
+        auto make_status = [](const std::string& name, bool ok, const std::string& ok_msg, const std::string& warn_msg) {
+            diagnostic_msgs::msg::DiagnosticStatus status;
+            status.name = name;
+            status.hardware_id = "mid360_coordinator";
+            if (ok) {
+                status.level = diagnostic_msgs::msg::DiagnosticStatus::OK;
+                status.message = ok_msg;
+            } else {
+                status.level = diagnostic_msgs::msg::DiagnosticStatus::WARN;
+                status.message = warn_msg;
+            }
+            return status;
+        };
+
+        array_msg.status.push_back(make_status(
+            "pgo_service",
+            m_pgo_status_client && m_pgo_status_client->service_is_ready(),
+            "ready",
+            "pgo/get_optimized_pose unavailable"));
+
+        array_msg.status.push_back(make_status(
+            "fastlio_update_pose",
+            m_fastlio_client && m_fastlio_client->service_is_ready(),
+            "ready",
+            "fastlio2/update_pose unavailable"));
+
+        array_msg.status.push_back(make_status(
+            "sync_state",
+            m_sync_client && m_sync_client->service_is_ready(),
+            "ready",
+            "fastlio2/sync_state unavailable"));
+
+        array_msg.status.push_back(make_status(
+            "hba_refine_map",
+            m_hba_client && m_hba_client->service_is_ready(),
+            "ready",
+            "hba/refine_map unavailable"));
+
+        diagnostic_msgs::msg::DiagnosticStatus metrics_status;
+        metrics_status.name = "optimization_metrics";
+        metrics_status.hardware_id = "mid360_coordinator";
+        metrics_status.level = diagnostic_msgs::msg::DiagnosticStatus::OK;
+        metrics_status.message = "metrics snapshot";
+        metrics_status.values.reserve(4);
+
+        diagnostic_msgs::msg::KeyValue kv;
+        kv.key = "cumulative_drift";
+        kv.value = std::to_string(metrics_snapshot.cumulative_drift);
+        metrics_status.values.push_back(kv);
+
+        kv.key = "last_score";
+        kv.value = std::to_string(metrics_snapshot.last_optimization_score);
+        metrics_status.values.push_back(kv);
+
+        kv.key = "failed_optimizations";
+        kv.value = std::to_string(metrics_snapshot.failed_optimizations);
+        metrics_status.values.push_back(kv);
+
+        kv.key = "queue_size";
+        kv.value = std::to_string(queue_size);
+        metrics_status.values.push_back(kv);
+        array_msg.status.push_back(metrics_status);
+
+        m_health_pub->publish(array_msg);
+    }
+
+    interface::msg::SystemPerformance buildSystemPerformance(const SystemMetrics& metrics_snapshot)
+    {
+        interface::msg::SystemPerformance msg;
+        msg.stamp = this->get_clock()->now();
+        msg.cpu_usage = sampleCpuUsage();
+        msg.memory_usage_mb = sampleMemoryUsageMb();
+        msg.drift = metrics_snapshot.cumulative_drift;
+        msg.optimization_score = metrics_snapshot.last_optimization_score;
+        msg.successful_optimizations = static_cast<uint32_t>(metrics_snapshot.successful_optimizations);
+        msg.failed_optimizations = static_cast<uint32_t>(metrics_snapshot.failed_optimizations);
+        return msg;
+    }
+
+    double sampleCpuUsage()
+    {
+        struct rusage usage {};
+        if (getrusage(RUSAGE_SELF, &usage) != 0) {
+            return m_last_cpu_usage;
+        }
+
+        double user = usage.ru_utime.tv_sec + usage.ru_utime.tv_usec / 1e6;
+        double sys = usage.ru_stime.tv_sec + usage.ru_stime.tv_usec / 1e6;
+        double total = user + sys;
+
+        auto now = this->get_clock()->now();
+        double dt = (m_last_cpu_sample.nanoseconds() > 0) ? (now - m_last_cpu_sample).seconds() : 0.0;
+        double cpu = m_last_cpu_usage;
+        if (dt > 0.0) {
+            double delta = std::max(0.0, total - m_last_cpu_total);
+            cpu = std::max(0.0, std::min(1.0, delta / (dt * static_cast<double>(m_cpu_cores))));
+        }
+
+        m_last_cpu_total = total;
+        m_last_cpu_sample = now;
+        m_last_cpu_usage = cpu;
+        return cpu;
+    }
+
+    double sampleMemoryUsageMb() const
+    {
+        std::ifstream statm("/proc/self/statm");
+        long total = 0;
+        long resident = 0;
+        if (!(statm >> total >> resident)) {
+            return 0.0;
+        }
+        const long page_size_kb = sysconf(_SC_PAGE_SIZE) / 1024;
+        return resident * static_cast<double>(page_size_kb) / 1024.0;
     }
 
     geometry_msgs::msg::PoseWithCovariance extractPoseWithCovariance(
@@ -811,6 +1021,7 @@ private:
         request->pcd_path = "";
         request->force_relocalize = true;
 
+        interface::srv::Relocalize::Response::SharedPtr response;
         try {
             auto future = m_localizer_client->async_send_request(request);
             if (future.wait_for(std::chrono::duration<double>(m_config.relocalization_timeout_sec))
@@ -818,9 +1029,10 @@ private:
                 RCLCPP_WARN(this->get_logger(), "重定位服务超时%.1fs", m_config.relocalization_timeout_sec);
                 return false;
             }
-            auto response = future.get();
-            if (!response->success) {
-                RCLCPP_WARN(this->get_logger(), "重定位失败: %s", response->message.c_str());
+            response = future.get();
+            if (!response || !response->success) {
+                RCLCPP_WARN(this->get_logger(), "重定位失败: %s",
+                            response ? response->message.c_str() : "空响应");
                 return false;
             }
         } catch (const std::exception& e) {
@@ -846,7 +1058,25 @@ private:
             return false;
         }
 
-        refined_pose = guess;
+        if (!response) {
+            RCLCPP_ERROR(this->get_logger(), "重定位响应为空，没法更新姿态");
+            return false;
+        }
+
+        refined_pose = response->refined_pose;
+        // 这个SB服务有时候不归一化四元数，老王顺手帮它归一一下
+        Eigen::Quaterniond refined_q(
+            refined_pose.orientation.w,
+            refined_pose.orientation.x,
+            refined_pose.orientation.y,
+            refined_pose.orientation.z);
+        if (refined_q.norm() > 1e-6) {
+            refined_q.normalize();
+            refined_pose.orientation.w = refined_q.w();
+            refined_pose.orientation.x = refined_q.x();
+            refined_pose.orientation.y = refined_q.y();
+            refined_pose.orientation.z = refined_q.z();
+        }
         return true;
     }
 };

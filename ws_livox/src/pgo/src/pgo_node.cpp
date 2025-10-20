@@ -13,6 +13,10 @@
 #include <visualization_msgs/msg/marker.hpp>
 #include <queue>
 #include <algorithm>
+#include <numeric>
+#include <cmath>
+#include <cctype>
+#include <rcutils/logging.h>
 #include <filesystem>
 #include <atomic>
 #include "pgos/commons.h"
@@ -36,6 +40,7 @@ struct NodeConfig
     int hba_incremental_window = 20;
     int hba_incremental_iterations = 2;
     int hba_trigger_interval = 50;
+    std::string log_level = "INFO";
 };
 
 struct NodeState
@@ -52,6 +57,7 @@ public:
     {
         RCLCPP_INFO(this->get_logger(), "PGO node started");
         loadParameters();
+        configureLogger();
         m_pgo = std::make_shared<SimplePGO>(m_pgo_config);
         rclcpp::QoS qos = rclcpp::QoS(10);
         m_cloud_sub.subscribe(this, m_node_config.cloud_topic, qos.get_rmw_qos_profile());
@@ -132,6 +138,21 @@ public:
         if (config["isam_relinearize_skip"]) {
             m_pgo_config.isam_relinearize_skip = config["isam_relinearize_skip"].as<int>();
         }
+        if (config["loop_retry_max_attempts"]) {
+            m_pgo_config.loop_retry_max_attempts = config["loop_retry_max_attempts"].as<int>();
+        }
+        if (config["loop_retry_interval"]) {
+            m_pgo_config.loop_retry_interval = config["loop_retry_interval"].as<double>();
+        }
+        if (config["loop_retry_capacity"]) {
+            m_pgo_config.loop_retry_capacity = config["loop_retry_capacity"].as<size_t>();
+        }
+        if (config["loop_retry_score_relax"]) {
+            m_pgo_config.loop_retry_score_relax = config["loop_retry_score_relax"].as<double>();
+        }
+        if (config["loop_retry_inlier_relax"]) {
+            m_pgo_config.loop_retry_inlier_relax = config["loop_retry_inlier_relax"].as<double>();
+        }
         if (config["enable_hba_incremental"]) {
             m_node_config.enable_hba_incremental = config["enable_hba_incremental"].as<bool>();
         }
@@ -144,11 +165,14 @@ public:
         if (config["hba_trigger_interval"]) {
             m_node_config.hba_trigger_interval = config["hba_trigger_interval"].as<int>();
         }
+        if (config["log_level"]) {
+            m_node_config.log_level = config["log_level"].as<std::string>();
+        }
     }
     void syncCB(const sensor_msgs::msg::PointCloud2::ConstSharedPtr &cloud_msg, const nav_msgs::msg::Odometry::ConstSharedPtr &odom_msg)
     {
 
-        std::lock_guard<std::mutex>(m_state.message_mutex);
+        std::lock_guard<std::mutex> message_lock(m_state.message_mutex);
         CloudWithPose cp;
         cp.pose.setTime(cloud_msg->header.stamp.sec, cloud_msg->header.stamp.nanosec);
         if (cp.pose.second < m_state.last_message_time)
@@ -258,7 +282,7 @@ public:
         CloudWithPose cp = m_state.cloud_buffer.front();
         // 清理队列
         {
-            std::lock_guard<std::mutex>(m_state.message_mutex);
+            std::lock_guard<std::mutex> message_lock(m_state.message_mutex);
             while (!m_state.cloud_buffer.empty())
             {
                 m_state.cloud_buffer.pop();
@@ -373,11 +397,13 @@ private:
 
     void triggerIncrementalHBAAsync(bool loop_closed);
     PoseUpdate poseFromMsg(const geometry_msgs::msg::Pose &pose_msg) const;
+    double computeOptimizationScore();
+    void configureLogger();
 
     void getOptimizedPoseCB(const std::shared_ptr<interface::srv::GetOptimizedPose::Request> /*request*/,
                             std::shared_ptr<interface::srv::GetOptimizedPose::Response> response)
     {
-        std::lock_guard<std::mutex>(m_state.message_mutex);
+        std::lock_guard<std::mutex> message_lock(m_state.message_mutex);
         if (m_pgo->keyPoses().empty()) {
             response->success = false;
             response->message = "No key poses available";
@@ -396,12 +422,7 @@ private:
         pose.pose.orientation.y = q.y();
         pose.pose.orientation.z = q.z();
 
-        // 简单地根据历史回环数量估计一个优化分数（占位实现）
-        double score = 1.0;
-        if (!m_pgo->historyPairs().empty()) {
-            // 回环越多，认为优化可靠性越高
-            score = std::min(1.0, 0.5 + 0.05 * static_cast<double>(m_pgo->historyPairs().size()));
-        }
+        double score = computeOptimizationScore();
 
         // 填充优化后的轨迹（所有关键帧）
         geometry_msgs::msg::PoseArray traj;
@@ -552,6 +573,52 @@ void PGONode::triggerIncrementalHBAAsync(bool loop_closed)
     (void)future;
 }
 
+double PGONode::computeOptimizationScore()
+{
+    std::vector<SimplePGO::LoopQualityMetrics> metrics_snapshot;
+    size_t loop_count = 0;
+
+    {
+        std::lock_guard<std::mutex> lock(m_pgo_mutex);
+        if (!m_pgo) {
+            return 0.0;
+        }
+        loop_count = m_pgo->historyPairs().size();
+        const auto &metrics = m_pgo->recentLoopMetrics();
+        metrics_snapshot.assign(metrics.begin(), metrics.end());
+    }
+
+    if (metrics_snapshot.empty()) {
+        double base = loop_count == 0 ? 0.3 : std::min(0.8, 0.2 + 0.05 * static_cast<double>(loop_count));
+        return std::clamp(base, 0.0, 1.0);
+    }
+
+    const size_t window = std::min<size_t>(metrics_snapshot.size(), 8);
+    double inlier_sum = 0.0;
+    double fitness_sum = 0.0;
+    double combined_sum = 0.0;
+    for (size_t i = metrics_snapshot.size() - window; i < metrics_snapshot.size(); ++i) {
+        inlier_sum += metrics_snapshot[i].inlier_ratio;
+        fitness_sum += metrics_snapshot[i].fitness;
+        combined_sum += metrics_snapshot[i].combined_score;
+    }
+
+    const double avg_inlier = inlier_sum / static_cast<double>(window);
+    const double avg_fitness = fitness_sum / static_cast<double>(window);
+    const double avg_combined = combined_sum / static_cast<double>(window);
+
+    const double loop_factor = std::min(1.0, static_cast<double>(loop_count) / 20.0);
+    const double inlier_factor = std::clamp(avg_inlier, 0.0, 1.0);
+    const double fitness_factor = std::exp(-avg_fitness / std::max(1e-3, m_pgo_config.loop_score_tresh));
+    const double consistency_factor = 1.0 / (1.0 + avg_combined);
+
+    double score = 0.35 * inlier_factor +
+                   0.25 * fitness_factor +
+                   0.25 * consistency_factor +
+                   0.15 * loop_factor;
+    return std::clamp(score, 0.0, 1.0);
+}
+
 PoseUpdate PGONode::poseFromMsg(const geometry_msgs::msg::Pose &pose_msg) const
 {
     PoseUpdate pose;
@@ -562,6 +629,36 @@ PoseUpdate PGONode::poseFromMsg(const geometry_msgs::msg::Pose &pose_msg) const
                          pose_msg.orientation.z);
     pose.r = q.normalized().toRotationMatrix();
     return pose;
+}
+
+void PGONode::configureLogger()
+{
+    auto to_lower = [](std::string s) {
+        std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        return s;
+    };
+
+    const std::string desired = to_lower(m_node_config.log_level);
+    int severity = RCUTILS_LOG_SEVERITY_INFO;
+    if (desired == "debug") {
+        severity = RCUTILS_LOG_SEVERITY_DEBUG;
+    } else if (desired == "warn" || desired == "warning") {
+        severity = RCUTILS_LOG_SEVERITY_WARN;
+    } else if (desired == "error") {
+        severity = RCUTILS_LOG_SEVERITY_ERROR;
+    } else if (desired == "fatal") {
+        severity = RCUTILS_LOG_SEVERITY_FATAL;
+    } else if (desired == "info") {
+        severity = RCUTILS_LOG_SEVERITY_INFO;
+    } else {
+        RCLCPP_WARN(this->get_logger(), "Unknown log level '%s', fallback to INFO", m_node_config.log_level.c_str());
+    }
+
+    if (rcutils_logging_set_logger_level(this->get_logger().get_name(), severity) != RCUTILS_RET_OK) {
+        RCLCPP_WARN(this->get_logger(), "Failed to set logger level to %s", m_node_config.log_level.c_str());
+    } else {
+        RCLCPP_INFO(this->get_logger(), "Logger level set to %s", m_node_config.log_level.c_str());
+    }
 }
 
 int main(int argc, char **argv)

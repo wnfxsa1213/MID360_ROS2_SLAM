@@ -394,26 +394,45 @@ class ConfigGenerator:
         """
         try:
             mc = self.master_config
+            pgo_master = mc.get('pgo', {})
 
             # 构建pgo.yaml配置
             pgo_config = {
                 # 基本话题配置
-                'cloud_topic': mc['pgo']['cloud_topic'],
-                'odom_topic': mc['pgo']['odom_topic'],
-                'map_frame': mc['pgo']['map_frame'],
-                'local_frame': mc['pgo']['local_frame'],
+                'cloud_topic': pgo_master['cloud_topic'],
+                'odom_topic': pgo_master['odom_topic'],
+                'map_frame': pgo_master['map_frame'],
+                'local_frame': pgo_master['local_frame'],
+                'log_level': pgo_master.get('log_level', "INFO"),
 
                 # 关键帧参数
-                'key_pose_delta_deg': mc['pgo']['key_pose_delta_deg'],
-                'key_pose_delta_trans': mc['pgo']['key_pose_delta_trans'],
+                'key_pose_delta_deg': pgo_master['key_pose_delta_deg'],
+                'key_pose_delta_trans': pgo_master['key_pose_delta_trans'],
 
                 # 回环检测参数
-                'loop_search_radius': mc['pgo']['loop_search_radius'],
-                'loop_time_tresh': mc['pgo']['loop_time_tresh'],
-                'loop_score_tresh': mc['pgo']['loop_score_tresh'],
-                'loop_submap_half_range': mc['pgo']['loop_submap_half_range'],
-                'submap_resolution': mc['pgo']['submap_resolution'],
-                'min_loop_detect_duration': mc['pgo']['min_loop_detect_duration'],
+                'loop_search_radius': pgo_master['loop_search_radius'],
+                'loop_time_tresh': pgo_master['loop_time_tresh'],
+                'loop_score_tresh': pgo_master['loop_score_tresh'],
+                'loop_submap_half_range': pgo_master['loop_submap_half_range'],
+                'submap_resolution': pgo_master['submap_resolution'],
+                'min_loop_detect_duration': pgo_master.get('min_loop_detect_duration', 0.0),
+
+                # 高级ICP/回环与优化参数
+                'min_inlier_ratio': pgo_master.get('min_inlier_ratio', 0.30),
+                'icp_max_distance': pgo_master.get('icp_max_distance', 2.0),
+                'max_candidates': pgo_master.get('max_candidates', 5),
+                'min_index_separation': pgo_master.get('min_index_separation', 10),
+                'inlier_threshold': pgo_master.get('inlier_threshold', 0.30),
+                'icp_max_iterations': pgo_master.get('icp_max_iterations', 50),
+                'icp_transformation_epsilon': pgo_master.get('icp_transformation_epsilon', 1e-6),
+                'icp_euclidean_fitness_epsilon': pgo_master.get('icp_euclidean_fitness_epsilon', 1e-6),
+                'isam_relinearize_threshold': pgo_master.get('isam_relinearize_threshold', 0.01),
+                'isam_relinearize_skip': pgo_master.get('isam_relinearize_skip', 1),
+                'loop_retry_max_attempts': pgo_master.get('loop_retry_max_attempts', 3),
+                'loop_retry_interval': pgo_master.get('loop_retry_interval', 5.0),
+                'loop_retry_capacity': pgo_master.get('loop_retry_capacity', 32),
+                'loop_retry_score_relax': pgo_master.get('loop_retry_score_relax', 1.5),
+                'loop_retry_inlier_relax': pgo_master.get('loop_retry_inlier_relax', 0.7),
             }
 
             # 生成配置文件
@@ -647,13 +666,29 @@ class ConfigGenerator:
         """
         try:
             coop = self.master_config.get('cooperation', {})
+
+            def get(key, default):
+                return coop.get(key, default)
+
             params = {
                 'coordinator': {
                     'ros__parameters': {
-                        'drift_threshold': coop.get('drift_threshold', 0.5),
-                        'time_threshold': coop.get('time_threshold', 60.0),
-                        'emergency_threshold': coop.get('emergency_threshold', 2.0),
-                        'auto_optimization': coop.get('auto_optimization', True)
+                        'drift_threshold': float(get('drift_threshold', 0.5)),
+                        'time_threshold': float(get('time_threshold', 60.0)),
+                        'emergency_threshold': float(get('emergency_threshold', 2.0)),
+                        'auto_optimization': bool(get('auto_optimization', True)),
+                        'service_timeout_ms': int(get('service_timeout_ms', 3000)),
+                        'emergency_failure_threshold': int(get('emergency_failure_threshold', 3)),
+                        'hba_maps_path': get('hba_maps_path', '/tmp/current_map.pcd'),
+                        'enable_relocalization': bool(get('enable_relocalization', True)),
+                        'min_pose_delta': float(get('min_pose_delta', 0.03)),
+                        'min_orientation_delta_deg': float(get('min_orientation_delta_deg', 0.5)),
+                        'optimization_score_threshold': float(get('optimization_score_threshold', 0.6)),
+                        'drift_history_size': int(get('drift_history_size', 20)),
+                        'relocalization_score_threshold': float(get('relocalization_score_threshold', 0.15)),
+                        'relocalization_timeout_sec': float(get('relocalization_timeout_sec', 10.0)),
+                        'relocalization_min_translation': float(get('relocalization_min_translation', 0.5)),
+                        'relocalization_min_yaw': float(get('relocalization_min_yaw', 5.0))
                     }
                 }
             }

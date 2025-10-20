@@ -41,6 +41,7 @@ include_directories(
   ${PCL_INCLUDE_DIRS}
   ${Sophus_INCLUDE_DIRS}
   /opt/ros/humble/include
+  ${CMAKE_CURRENT_SOURCE_DIR}/../interface/include
 )
 
 set(SRC_LIST src/hba/commons.cpp

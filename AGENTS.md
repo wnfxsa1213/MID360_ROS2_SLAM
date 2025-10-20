@@ -1,33 +1,19 @@
 # Repository Guidelines
 
 ## Project Structure & Module Organization
-- `ws_livox/` holds the ROS2 workspace with core packages: SLAM nodes under `fastlio2`, localization in `localizer`, optimization in `pgo`, plus `hba`, drivers (`livox_ros_driver2`), and shared `interface/`.
-- Configuration YAML lives in `config/`; timestamped backups sit in `config/backups/` for rollbacks.
-- Utility scripts are under `tools/`, while repo-level smoke tests start with `test_*.sh`.
-- Generated artifacts and datasets stay outside the code path in `data/`, `test_data/`, `recorded_data/`, `saved_maps/`, and logs in `log/`.
+The ROS2 overlay lives in `ws_livox/`, where SLAM logic is grouped under `fastlio2`, localization under `localizer`, and backend optimization in `pgo`. Shared interfaces and drivers (including `livox_ros_driver2`) stay alongside `hba` utilities. Runtime configuration files sit in `config/`, with every change mirrored to `config/backups/` for rollbacks. Long-running assets such as datasets, bag files, and generated maps belong in `data/`, `test_data/`, `recorded_data/`, `saved_maps/`, while logs collect in `log/` and `validation_results/`. Repo-level helper scripts and smoke tests live in `tools/`.
 
 ## Build, Test, and Development Commands
-- `cd ws_livox && colcon build --symlink-install` — build the entire workspace with symlinked installs for faster iteration.
-- `source ws_livox/install/setup.bash` — load the overlay before launching any ROS2 nodes.
-- `ros2 launch fastlio2 cooperative_slam_system.launch.py` — run the end-to-end SLAM stack.
-- `bash tools/check_slam.sh` — quick integration smoke test for tooling sanity.
-- `python3 tools/pcd_to_gridmap.py --pcd saved_maps/example.pcd` — convert a saved PCD map to a gridmap for validation.
+Run `cd ws_livox && colcon build --symlink-install` to build the full workspace with editable installs. Source `ws_livox/install/setup.bash` before launching anything so ROS2 can resolve packages. Execute `ros2 launch fastlio2 cooperative_slam_system.launch.py` for the end-to-end SLAM stack. Use `bash tools/check_slam.sh` for a quick integration check, and `python3 tools/pcd_to_gridmap.py --pcd saved_maps/example.pcd` when converting LiDAR maps into grid maps for downstream validation.
 
 ## Coding Style & Naming Conventions
-- C++ nodes follow ROS2 ament defaults: 2-space indent, snake_case files, CamelCase types, lower_snake_case functions and variables.
-- Python utilities use 4-space indent, lowercase module names, and prefer `argparse` for CLIs; format with `black --line-length 88`.
-- Launch/config YAML keep lower_snake_case keys; mirror sample configs into `config/backups/` when adjusted.
+C++ nodes follow ament defaults: 2-space indentation, snake_case filenames, CamelCase classes, and lower_snake_case members and functions. Python utilities keep 4-space indentation, lowercase module names, and rely on `argparse`; format them with `black --line-length 88`. Launch and configuration YAML files prefer lower_snake_case keys, and any tweaks must be copied to `config/backups/` before review.
 
 ## Testing Guidelines
-- Prefer scenario runners in `tools/` and repo-level `test_*.sh` scripts; add new scripts as `tools/test_<feature>.py` to stay consistent.
-- Validate SLAM pipelines with `bash tools/check_slam.sh` and `python3 tools/replay_validation.py`; inspect outputs under `validation_results/`.
-- Keep regression coverage by replaying relevant bags in `test_data/` whenever sensor models change.
+Scenario runners and smoke tests start with `test_*.sh` at the repository root; add new checks as `tools/test_<feature>.py`. Validate primary SLAM flows via `bash tools/check_slam.sh`, inspect `validation_results/`, and replay representative bags from `test_data/` after sensor-model changes. Failed runs should capture logs under `log/` for triage.
 
 ## Commit & Pull Request Guidelines
-- Write commits in imperative mood scoped by package, e.g., `localizer: fix voxel downsampling overflow`; group config updates with matching backups.
-- PRs need problem statements, approach summaries, linked issues, and explicit validation commands; attach RViz captures or metrics for SLAM-focused changes.
-- Document config edits in `docs/` when behavior shifts, and never push large bags or credentials.
+Write commits in the format `package: imperative action`, e.g., `localizer: fix voxel downsampling overflow`, and bundle config edits with their timestamped backups. Pull requests must link issues, describe the problem and approach, list validation commands, and attach metrics or RViz screenshots for SLAM-impacting changes. Never include large datasets or credentials; instead, document their storage location in `docs/`.
 
 ## Security & Configuration Tips
-- Store sensitive maps and recordings locally under ignored directories; verify `.gitignore` before adding data.
-- Back up any modified YAML to `config/backups/<timestamp>.yaml` and reference it in review notes for traceability.
+Keep sensitive maps and recordings outside version control under ignored directories, and confirm `.gitignore` catches new artifacts. Before merging, verify configuration diffs reference their backup copies and note any environmental requirements in `docs/` for future operators.

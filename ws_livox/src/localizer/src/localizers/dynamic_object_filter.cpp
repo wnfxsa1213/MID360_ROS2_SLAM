@@ -13,14 +13,17 @@
 #include <unordered_set>
 #include <limits>
 #include <thread>
-#include <rclcpp/rclcpp.hpp>
+#include <type_traits>
 
 namespace localizers {
 
 // ================ 构造函数和初始化 ================
 
 DynamicObjectFilter::DynamicObjectFilter(const DynamicFilterConfig& config)
-    : config_(config), initialized_(false), debug_mode_(false) {
+    : config_(config),
+      frame_config_(config),
+      initialized_(false),
+      debug_mode_(false) {
     
     if (!config_.isValid()) {
         throw std::invalid_argument("无效的动态过滤器配置参数");
@@ -92,7 +95,11 @@ CloudType::Ptr DynamicObjectFilter::filterDynamicObjects(const CloudType::Ptr& i
       return std::make_shared<CloudType>();
     }
     
-    // 2. 更新历史数据
+    // 2. 自适应阈值调整
+    frame_config_ = config_;
+    applyAdaptiveThresholds(processed_cloud);
+
+    // 3. 更新历史数据
     t0 = std::chrono::high_resolution_clock::now();
     updateHistory(processed_cloud, timestamp);
     t1 = std::chrono::high_resolution_clock::now();
@@ -104,7 +111,7 @@ CloudType::Ptr DynamicObjectFilter::filterDynamicObjects(const CloudType::Ptr& i
       debugLog(ss.str());
     }
     
-    // 3. 检测动态点
+    // 4. 检测动态点
     t0 = std::chrono::high_resolution_clock::now();
     std::vector<uint8_t> dynamic_mask = detectDynamicPoints(processed_cloud, timestamp);
     t1 = std::chrono::high_resolution_clock::now();
@@ -118,7 +125,7 @@ CloudType::Ptr DynamicObjectFilter::filterDynamicObjects(const CloudType::Ptr& i
       debugLog(ss.str());
     }
     
-    // 4. 创建过滤后的点云和动态点云
+    // 5. 创建过滤后的点云和动态点云
     t0 = std::chrono::high_resolution_clock::now();
     CloudType::Ptr filtered_cloud = createFilteredCloud(processed_cloud, dynamic_mask);
     t1 = std::chrono::high_resolution_clock::now();
@@ -139,7 +146,7 @@ CloudType::Ptr DynamicObjectFilter::filterDynamicObjects(const CloudType::Ptr& i
         }
         last_dynamic_cloud_->header = processed_cloud->header;
         
-        // 5. 更新统计信息
+        // 6. 更新统计信息
         auto end_time = std::chrono::high_resolution_clock::now();
         auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end_time - start_time);
         double processing_time_ms = duration.count() / 1000.0;
@@ -162,7 +169,7 @@ CloudType::Ptr DynamicObjectFilter::filterDynamicObjects(const CloudType::Ptr& i
         if (debug_mode_) {
             debugLog(err_msg);
         } else {
-            RCLCPP_WARN_STREAM(rclcpp::get_logger("dynamic_object_filter"), err_msg);
+            std::cerr << "[dynamic_object_filter] " << err_msg << std::endl;
         }
         // 降级策略：返回原始点云，避免直接丢帧导致稀疏地图
         return input_cloud;
@@ -209,7 +216,7 @@ std::vector<uint8_t> DynamicObjectFilter::detectDynamicPoints(const CloudType::P
     
   for (size_t idx = 0; idx < temporal_info.size(); ++idx) {
     float stability = computeStabilityScore(temporal_info[idx]);
-    if (stability < config_.stability_threshold) {
+    if (stability < frame_config_.stability_threshold) {
       temporal_candidates[idx] = 1;
     }
   }
@@ -312,9 +319,9 @@ float DynamicObjectFilter::computeStabilityScore(const PointTemporalInfo& info) 
     MotionFeatures motion = analyzeMotionPattern(info);
     
     // 综合评分计算
-    float displacement_score = std::exp(-mean_displacement / config_.motion_threshold);
+    float displacement_score = std::exp(-mean_displacement / frame_config_.motion_threshold);
     float consistency_score = motion.direction_consistency;
-    float smoothness_score = std::exp(-std_deviation / config_.motion_threshold);
+    float smoothness_score = std::exp(-std_deviation / frame_config_.motion_threshold);
     
     // 加权组合
     float stability_score = 0.4f * displacement_score + 
@@ -437,20 +444,20 @@ std::vector<uint8_t> DynamicObjectFilter::geometricConsistencyCheck(
                                            bool geometricDynamic,
                                            const DensityFeatures& density_features) -> bool {
         if (temporalDynamic && !geometricDynamic) {
-            if (density_features.smoothness < config_.uncertain_smoothness_thresh) {
+            if (density_features.smoothness < frame_config_.uncertain_smoothness_thresh) {
                 return true;
             }
-            if (density_features.density_variance > 0.5f * config_.density_ratio_thresh) {
+            if (density_features.density_variance > 0.5f * frame_config_.density_ratio_thresh) {
                 return true;
             }
             return false;
         }
 
         if (!temporalDynamic && geometricDynamic) {
-            if (density_features.density_variance > config_.density_ratio_thresh) {
+            if (density_features.density_variance > frame_config_.density_ratio_thresh) {
                 return true;
             }
-            if (density_features.smoothness < config_.uncertain_smoothness_thresh * 0.8f) {
+            if (density_features.smoothness < frame_config_.uncertain_smoothness_thresh * 0.8f) {
                 return true;
             }
             return false;
@@ -470,7 +477,7 @@ std::vector<uint8_t> DynamicObjectFilter::geometricConsistencyCheck(
         std::vector<float> neighbor_distances;
 
         int found_neighbors = local_kdtree.radiusSearch(
-            cloud->points[idx], config_.search_radius,
+            cloud->points[idx], frame_config_.search_radius,
             neighbor_indices, neighbor_distances);
 
         if (found_neighbors < config_.min_neighbors) {
@@ -520,13 +527,13 @@ std::vector<uint8_t> DynamicObjectFilter::geometricConsistencyCheck(
 
         if (valid_normal_count > 0) {
             float avg_normal_consistency = normal_consistency_sum / valid_normal_count;
-            if (avg_normal_consistency < config_.normal_consistency_thresh) {
+            if (avg_normal_consistency < frame_config_.normal_consistency_thresh) {
                 is_geometrically_consistent = false;
             }
         }
 
         // 密度一致性检查
-        if (density_features.density_variance > config_.density_ratio_thresh) {
+        if (density_features.density_variance > frame_config_.density_ratio_thresh) {
             is_geometrically_consistent = false;
         }
 
@@ -616,8 +623,8 @@ DynamicObjectFilter::DensityFeatures DynamicObjectFilter::analyzeDensityFeatures
     const int neighbor_count = static_cast<int>(neighbor_indices.size());
     
     // 计算局部密度
-    float sphere_volume = (4.0f / 3.0f) * M_PI * 
-                         std::pow(config_.search_radius, 3);
+    float sphere_volume = (4.0f / 3.0f) * static_cast<float>(M_PI) *
+                         std::pow(frame_config_.search_radius, 3);
     if (sphere_volume > std::numeric_limits<float>::min()) {
         features.local_density = neighbor_count / sphere_volume;
     }
@@ -770,7 +777,7 @@ std::vector<int> DynamicObjectFilter::findCorrespondingPoints(
         if (ref_kdtree->nearestKSearch(current_cloud->points[i], 1,
                                        nearest_indices, nearest_distances) > 0) {
             // 距离阈值检查
-            if (nearest_distances[0] < config_.search_radius * config_.search_radius) {
+            if (nearest_distances[0] < frame_config_.search_radius * frame_config_.search_radius) {
                 correspondence[i] = nearest_indices[0];
             }
         }
@@ -806,6 +813,153 @@ CloudType::Ptr DynamicObjectFilter::createFilteredCloud(
     return filtered_cloud;
 }
 
+DynamicObjectFilter::EnvironmentProfile DynamicObjectFilter::classifyEnvironment(
+    const CloudType::Ptr& cloud) const
+{
+    if (!cloud || cloud->empty()) {
+        return last_environment_profile_;
+    }
+
+    Eigen::Vector3f min_pt(std::numeric_limits<float>::max(),
+                           std::numeric_limits<float>::max(),
+                           std::numeric_limits<float>::max());
+    Eigen::Vector3f max_pt(std::numeric_limits<float>::lowest(),
+                           std::numeric_limits<float>::lowest(),
+                           std::numeric_limits<float>::lowest());
+    double range_sum = 0.0;
+    size_t valid_points = 0;
+
+    for (const auto& pt : cloud->points) {
+        if (!std::isfinite(pt.x) || !std::isfinite(pt.y) || !std::isfinite(pt.z)) {
+            continue;
+        }
+        min_pt.x() = std::min(min_pt.x(), pt.x);
+        min_pt.y() = std::min(min_pt.y(), pt.y);
+        min_pt.z() = std::min(min_pt.z(), pt.z);
+
+        max_pt.x() = std::max(max_pt.x(), pt.x);
+        max_pt.y() = std::max(max_pt.y(), pt.y);
+        max_pt.z() = std::max(max_pt.z(), pt.z);
+
+        range_sum += std::sqrt(pt.x * pt.x + pt.y * pt.y + pt.z * pt.z);
+        ++valid_points;
+    }
+
+    if (valid_points == 0) {
+        return last_environment_profile_;
+    }
+
+    const float diagonal = (max_pt - min_pt).norm();
+    const float mean_range = static_cast<float>(range_sum / static_cast<double>(valid_points));
+
+    constexpr float indoor_diag_limit = 18.0f;
+    constexpr float indoor_range_limit = 12.0f;
+    constexpr float outdoor_diag_limit = 32.0f;
+    constexpr float outdoor_range_limit = 18.0f;
+
+    if (diagonal < indoor_diag_limit && mean_range < indoor_range_limit) {
+        return EnvironmentProfile::INDOOR;
+    }
+
+    if (diagonal > outdoor_diag_limit || mean_range > outdoor_range_limit) {
+        return EnvironmentProfile::OUTDOOR;
+    }
+
+    return last_environment_profile_;
+}
+
+void DynamicObjectFilter::applyAdaptiveThresholds(const CloudType::Ptr& cloud)
+{
+    EnvironmentProfile env = classifyEnvironment(cloud);
+    if (env == EnvironmentProfile::UNKNOWN) {
+        return;
+    }
+
+    frame_config_ = config_;
+
+    if (env == EnvironmentProfile::INDOOR) {
+        frame_config_.motion_threshold = std::max(0.02f, config_.motion_threshold * 0.7f);
+        frame_config_.stability_threshold = std::clamp(config_.stability_threshold - 0.1f, 0.3f, 0.95f);
+        frame_config_.search_radius = std::max(0.05f, config_.search_radius * 0.85f);
+    } else if (env == EnvironmentProfile::OUTDOOR) {
+        frame_config_.motion_threshold = config_.motion_threshold * 1.2f;
+        frame_config_.stability_threshold = std::min(0.95f, config_.stability_threshold + 0.05f);
+        frame_config_.normal_consistency_thresh = std::clamp(config_.normal_consistency_thresh + 0.1f, 0.0f, 1.0f);
+        frame_config_.density_ratio_thresh = std::clamp(config_.density_ratio_thresh + 0.15f, 0.0f, 1.0f);
+        frame_config_.search_radius = std::max(0.1f, config_.search_radius * 1.2f);
+    }
+
+    last_environment_profile_ = env;
+
+    if (debug_mode_) {
+        std::ostringstream ss;
+        ss << "[adaptive] environment="
+           << (env == EnvironmentProfile::INDOOR ? "indoor" : "outdoor")
+           << ", motion_thresh=" << frame_config_.motion_threshold
+           << ", stability_thresh=" << frame_config_.stability_threshold
+           << ", search_radius=" << frame_config_.search_radius
+           << ", normal_consistency=" << frame_config_.normal_consistency_thresh
+           << ", density_ratio=" << frame_config_.density_ratio_thresh;
+        debugLog(ss.str());
+    }
+}
+
+std::vector<std::string> DynamicObjectFilter::sanitizeConfig(DynamicFilterConfig& config)
+{
+    std::vector<std::string> issues;
+    DynamicFilterConfig defaults;
+
+    auto ensure_positive = [&](auto& value, auto fallback, const char* name) {
+        using ValueType = std::remove_reference_t<decltype(value)>;
+        if (value <= static_cast<ValueType>(0)) {
+            value = fallback;
+            issues.emplace_back(std::string(name) + " <= 0, reset to default");
+        }
+    };
+
+    ensure_positive(config.motion_threshold, defaults.motion_threshold, "motion_threshold");
+    ensure_positive(config.history_size, defaults.history_size, "history_size");
+    ensure_positive(config.max_time_diff, defaults.max_time_diff, "max_time_diff");
+    ensure_positive(config.search_radius, defaults.search_radius, "search_radius");
+    ensure_positive(config.min_neighbors, defaults.min_neighbors, "min_neighbors");
+    ensure_positive(config.downsample_ratio, defaults.downsample_ratio, "downsample_ratio");
+    ensure_positive(config.max_points_per_frame, defaults.max_points_per_frame, "max_points_per_frame");
+    ensure_positive(config.voxel_size_base, defaults.voxel_size_base, "voxel_size_base");
+
+    auto clamp_unit = [&](float& value, float fallback, const char* name) {
+        if (!(value >= 0.0f && value <= 1.0f)) {
+            value = std::clamp(value, 0.0f, 1.0f);
+            issues.emplace_back(std::string(name) + " out of [0,1], clamped");
+            if (!(value >= 0.0f && value <= 1.0f)) {
+                value = fallback;
+                issues.emplace_back(std::string(name) + " invalid after clamp, reset to default");
+            }
+        }
+    };
+
+    clamp_unit(config.stability_threshold, defaults.stability_threshold, "stability_threshold");
+    clamp_unit(config.normal_consistency_thresh, defaults.normal_consistency_thresh, "normal_consistency_thresh");
+    clamp_unit(config.density_ratio_thresh, defaults.density_ratio_thresh, "density_ratio_thresh");
+    clamp_unit(config.uncertain_smoothness_thresh, defaults.uncertain_smoothness_thresh, "uncertain_smoothness_thresh");
+
+    if (config.history_size > 64) {
+        config.history_size = 64;
+        issues.emplace_back("history_size too large, capped at 64 to control memory usage");
+    }
+
+    if (config.max_points_per_frame > 500000) {
+        config.max_points_per_frame = 500000;
+        issues.emplace_back("max_points_per_frame too large, capped at 500000");
+    }
+
+    if (config.voxel_size_base < 1e-4f) {
+        config.voxel_size_base = defaults.voxel_size_base;
+        issues.emplace_back("voxel_size_base too small, reset to default");
+    }
+
+    return issues;
+}
+
 // ================ 配置和状态管理 ================
 
 bool DynamicObjectFilter::updateConfig(const DynamicFilterConfig& config) {
@@ -819,6 +973,7 @@ bool DynamicObjectFilter::updateConfig(const DynamicFilterConfig& config) {
     }
     
     config_ = config;
+    frame_config_ = config_;
     
     // 更新PCL组件配置
     normal_estimator_.setKSearch(config_.min_neighbors);

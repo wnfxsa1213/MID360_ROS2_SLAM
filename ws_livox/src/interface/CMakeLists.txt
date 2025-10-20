@@ -25,8 +25,16 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "srv/GetOptimizedPose.srv"
   "srv/IncrementalRefine.srv"
   "msg/FilterStats.msg"
+  "msg/SystemPerformance.msg"
   DEPENDENCIES std_msgs geometry_msgs sensor_msgs builtin_interfaces
 )
+
+install(DIRECTORY include/
+  DESTINATION include
+)
+
+ament_export_include_directories(include)
+ament_export_dependencies(rosidl_default_runtime)
 
 
 

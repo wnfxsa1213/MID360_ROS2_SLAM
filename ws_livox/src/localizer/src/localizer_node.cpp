@@ -17,6 +17,7 @@
 #include "localizers/commons.h"
 #include "localizers/icp_localizer.h"
 #include "localizers/dynamic_object_filter.h"
+#include "interface/error_codes.hpp"
 #include "interface/srv/relocalize.hpp"
 #include "interface/srv/is_valid.hpp"
 #include "interface/msg/filter_stats.hpp"
@@ -180,10 +181,17 @@ public:
             m_filter_config = filter_defaults;
         }
 
-        // 验证动态过滤器配置
-        if (m_config.enable_dynamic_filter && !m_filter_config.isValid()) {
-            RCLCPP_ERROR(this->get_logger(), "Invalid dynamic filter configuration! Disabling dynamic filter.");
-            m_config.enable_dynamic_filter = false;
+        if (m_config.enable_dynamic_filter) {
+            auto issues = localizers::DynamicObjectFilter::sanitizeConfig(m_filter_config);
+            for (const auto& issue : issues) {
+                RCLCPP_WARN(this->get_logger(), "[FilterConfig] %s", issue.c_str());
+            }
+            if (!m_filter_config.isValid()) {
+                RCLCPP_ERROR(this->get_logger(), "%s",
+                             interface::errors::format(interface::errors::Code::INVALID_CONFIGURATION,
+                                                       "dynamic filter configuration invalid after sanitization").c_str());
+                m_config.enable_dynamic_filter = false;
+            }
         }
 
         if (m_use_external_filter) {

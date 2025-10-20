@@ -17,8 +17,7 @@ void HBA::optimize()
     gtsam::LevenbergMarquardtParams lm_params;
     gtsam::NonlinearFactorGraph graph;
 
-    // for (size_t i = 0; i < m_config.hba_iter; i++)
-    // {
+    // 这个SB流程单轮就能收敛，多轮收益极低，谁要改请先把理论推清楚
     Vec<Vec<BLAM>>().swap(m_lbas);
     m_lbas.resize(m_levels, Vec<BLAM>());
     Vec<pcl::PointCloud<pcl::PointXYZI>::Ptr> clouds = m_clouds;
@@ -68,7 +67,6 @@ void HBA::optimize()
         m_poses[j].t = pose.translation().matrix().cast<double>();
         m_poses[j].r = pose.rotation().matrix().cast<double>();
     }
-    // }
 }
 void HBA::updateCloudsAndPose(Vec<pcl::PointCloud<pcl::PointXYZI>::Ptr> &clouds, Vec<Pose> &poses, int level)
 {

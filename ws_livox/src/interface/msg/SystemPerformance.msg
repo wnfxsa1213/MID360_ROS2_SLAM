@@ -1,0 +1,7 @@
+builtin_interfaces/Time stamp
+float64 cpu_usage
+float64 memory_usage_mb
+float64 drift
+float64 optimization_score
+uint32 successful_optimizations
+uint32 failed_optimizations

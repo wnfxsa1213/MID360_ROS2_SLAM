@@ -53,39 +53,75 @@ void OctoTree::buildPlanes()
 void OctoTree::doMergePoints()
 {
     assert(m_is_valid && m_is_plane);
-    std::unordered_map<uint32_t, PointType> id_point_map;
-    for (PointType &point : m_points)
+    struct AccumulatedPoint
     {
-        uint32_t id = point.id;
-        if (id_point_map.find(id) == id_point_map.end())
+        double sum_x = 0.0;
+        double sum_y = 0.0;
+        double sum_z = 0.0;
+        double sum_intensity = 0.0;
+        double sum_lx = 0.0;
+        double sum_ly = 0.0;
+        double sum_lz = 0.0;
+        uint32_t frame_id = 0;
+        uint32_t point_id = 0;
+        uint32_t count = 0;
+    };
+
+    auto make_key = [](uint32_t frame_id, uint32_t point_id) -> uint64_t {
+        return (static_cast<uint64_t>(frame_id) << 32) | static_cast<uint64_t>(point_id);
+    };
+
+    std::unordered_map<uint64_t, AccumulatedPoint> id_point_map;
+    id_point_map.reserve(m_points.size());
+    uint32_t fallback_local_id = 0;
+
+    for (const PointType &point : m_points)
+    {
+        uint32_t frame_id = point.id;
+        uint32_t local_id = 0;
+        if (point.time >= 0.0)
         {
-            id_point_map[id] = point;
-            id_point_map[id].time = 1.0;
+            local_id = static_cast<uint32_t>(point.time);
         }
         else
         {
-            id_point_map[id].x += point.x;
-            id_point_map[id].y += point.y;
-            id_point_map[id].z += point.z;
-            id_point_map[id].intensity += point.intensity;
-            id_point_map[id].lx += point.lx;
-            id_point_map[id].ly += point.ly;
-            id_point_map[id].lz += point.lz;
-            id_point_map[id].time += 1.0;
+            local_id = fallback_local_id++;
         }
+
+        uint64_t key = make_key(frame_id, local_id);
+        AccumulatedPoint &entry = id_point_map[key];
+        if (entry.count == 0)
+        {
+            entry.frame_id = frame_id;
+            entry.point_id = local_id;
+        }
+        entry.sum_x += point.x;
+        entry.sum_y += point.y;
+        entry.sum_z += point.z;
+        entry.sum_intensity += point.intensity;
+        entry.sum_lx += point.lx;
+        entry.sum_ly += point.ly;
+        entry.sum_lz += point.lz;
+        entry.count += 1;
     }
 
     PointVec().swap(m_merged_points);
-    for (auto &iter : id_point_map)
+    m_merged_points.reserve(id_point_map.size());
+    for (const auto &iter : id_point_map)
     {
-        PointType &point = iter.second;
-        point.x /= point.time;
-        point.y /= point.time;
-        point.z /= point.time;
-        point.intensity /= point.time;
-        point.lx /= point.time;
-        point.ly /= point.time;
-        point.lz /= point.time;
+        const AccumulatedPoint &acc = iter.second;
+        if (acc.count == 0) continue;
+
+        PointType point;
+        double denom = static_cast<double>(acc.count);
+        point.x = static_cast<float>(acc.sum_x / denom);
+        point.y = static_cast<float>(acc.sum_y / denom);
+        point.z = static_cast<float>(acc.sum_z / denom);
+        point.intensity = static_cast<float>(acc.sum_intensity / denom);
+        point.lx = static_cast<float>(acc.sum_lx / denom);
+        point.ly = static_cast<float>(acc.sum_ly / denom);
+        point.lz = static_cast<float>(acc.sum_lz / denom);
+        point.id = acc.frame_id;
         point.time = 1.0;
         m_merged_points.push_back(point);
     }
@@ -297,8 +333,9 @@ void BLAM::buildVoxels()
     {
         pcl::PointCloud<pcl::PointXYZI>::Ptr cloud = m_clouds[i];
         const Pose &pose = m_poses[i];
-        for (pcl::PointXYZI &point : cloud->points)
+        for (size_t j = 0; j < cloud->points.size(); ++j)
         {
+            const pcl::PointXYZI &point = cloud->points[j];
             PointType p;
             V3D p_vec(point.x, point.y, point.z);
             p_vec = pose.r * p_vec + pose.t;
@@ -310,7 +347,7 @@ void BLAM::buildVoxels()
             p.lz = point.z;
             p.intensity = point.intensity;
             p.id = static_cast<uint32_t>(i);
-            p.time = 1.0;
+            p.time = static_cast<double>(j);
             addPoint(p);
         }
     }

@@ -1,6 +1,8 @@
 #include "simple_pgo.h"
 #include <limits>
 #include <cmath>
+#include <algorithm>
+#include <iterator>
 
 SimplePGO::SimplePGO(const Config &config) : m_config(config)
 {
@@ -128,6 +130,163 @@ CloudType::Ptr SimplePGO::getSubMap(int idx, int half_range, double resolution)
     return ret;
 }
 
+SimplePGO::LoopEvaluationResult SimplePGO::evaluateLoopCandidate(size_t cur_idx,
+                                                                 int loop_idx,
+                                                                 const CloudType::Ptr& source_cloud,
+                                                                 double score_relax_factor,
+                                                                 double inlier_relax_factor)
+{
+    LoopEvaluationResult result;
+    if (loop_idx < 0 || loop_idx >= static_cast<int>(m_key_poses.size())) {
+        return result;
+    }
+
+    CloudType::Ptr target_cloud = getSubMap(loop_idx, m_config.loop_submap_half_range, m_config.submap_resolution);
+    CloudType::Ptr aligned(new CloudType);
+
+    m_icp.setMaxCorrespondenceDistance(m_config.icp_max_distance);
+    m_icp.setInputSource(source_cloud);
+    m_icp.setInputTarget(target_cloud);
+    m_icp.align(*aligned);
+
+    if (!m_icp.hasConverged()) {
+        result.failure_reason = LoopEvaluationResult::FailureReason::ICP_NOT_CONVERGED;
+        return result;
+    }
+
+    result.fitness = m_icp.getFitnessScore();
+    result.inlier_ratio = computeInlierRatio(aligned, target_cloud, m_config.inlier_threshold);
+    result.combined_score = result.fitness / std::max(1e-3, result.inlier_ratio);
+
+    double fitness_threshold = m_config.loop_score_tresh * std::max(1.0, score_relax_factor);
+    if (result.fitness > fitness_threshold) {
+        result.failure_reason = LoopEvaluationResult::FailureReason::FITNESS_THRESHOLD;
+        return result;
+    }
+
+    double min_inlier = std::clamp(m_config.min_inlier_ratio * inlier_relax_factor, 0.0, 1.0);
+    if (result.inlier_ratio < min_inlier) {
+        result.failure_reason = LoopEvaluationResult::FailureReason::INLIER_THRESHOLD;
+        return result;
+    }
+
+    LoopPair pair;
+    pair.source_id = cur_idx;
+    pair.target_id = static_cast<size_t>(loop_idx);
+
+    const M4F tf = m_icp.getFinalTransformation();
+    M3D r_refined = tf.block<3, 3>(0, 0).cast<double>() * m_key_poses[cur_idx].r_global;
+    V3D t_refined = tf.block<3, 3>(0, 0).cast<double>() * m_key_poses[cur_idx].t_global +
+                    tf.block<3, 1>(0, 3).cast<double>();
+    pair.r_offset = m_key_poses[loop_idx].r_global.transpose() * r_refined;
+    pair.t_offset = m_key_poses[loop_idx].r_global.transpose() * (t_refined - m_key_poses[loop_idx].t_global);
+    pair.inlier_ratio = result.inlier_ratio;
+    pair.fitness = result.fitness;
+    pair.combined_score = result.combined_score;
+    pair.score = std::max(1e-4, result.combined_score);
+
+    result.pair = pair;
+    result.success = true;
+    result.failure_reason = LoopEvaluationResult::FailureReason::NONE;
+    return result;
+}
+
+void SimplePGO::registerLoopRetryCandidate(int loop_idx,
+                                           double current_time,
+                                           const LoopEvaluationResult& eval)
+{
+    if (m_config.loop_retry_max_attempts <= 0 || loop_idx < 0) {
+        return;
+    }
+    if (eval.failure_reason == LoopEvaluationResult::FailureReason::ICP_NOT_CONVERGED ||
+        eval.failure_reason == LoopEvaluationResult::FailureReason::NONE) {
+        return;
+    }
+
+    const size_t target_id = static_cast<size_t>(loop_idx);
+    auto existing = std::find_if(m_loop_retry_queue.begin(), m_loop_retry_queue.end(),
+                                 [target_id](const LoopRetryEntry& entry) {
+                                     return entry.target_id == target_id;
+                                 });
+    if (existing != m_loop_retry_queue.end()) {
+        existing->last_attempt_time = current_time;
+        existing->last_recorded_score = std::min(existing->last_recorded_score, eval.combined_score);
+        return;
+    }
+
+    LoopRetryEntry entry;
+    entry.target_id = target_id;
+    entry.attempts = 1;
+    entry.last_attempt_time = current_time;
+    entry.last_recorded_score = eval.combined_score;
+    m_loop_retry_queue.push_back(entry);
+
+    while (m_loop_retry_queue.size() > m_config.loop_retry_capacity) {
+        m_loop_retry_queue.pop_front();
+    }
+}
+
+bool SimplePGO::tryRetryCandidates(size_t cur_idx,
+                                   const CloudType::Ptr& source_cloud,
+                                   double current_time,
+                                   LoopPair& out_pair,
+                                   double& out_score)
+{
+    if (m_loop_retry_queue.empty()) {
+        return false;
+    }
+
+    for (auto it = m_loop_retry_queue.begin(); it != m_loop_retry_queue.end();) {
+        if (it->target_id >= m_key_poses.size()) {
+            it = m_loop_retry_queue.erase(it);
+            continue;
+        }
+
+        if ((current_time - it->last_attempt_time) < m_config.loop_retry_interval) {
+            ++it;
+            continue;
+        }
+
+        auto eval = evaluateLoopCandidate(cur_idx,
+                                          static_cast<int>(it->target_id),
+                                          source_cloud,
+                                          m_config.loop_retry_score_relax,
+                                          m_config.loop_retry_inlier_relax);
+        it->last_attempt_time = current_time;
+        it->attempts = std::min(it->attempts + 1, m_config.loop_retry_max_attempts);
+
+        if (eval.success) {
+            out_pair = eval.pair;
+            out_score = eval.combined_score;
+            m_loop_retry_queue.erase(it);
+            return true;
+        }
+
+        const bool give_up = eval.failure_reason == LoopEvaluationResult::FailureReason::ICP_NOT_CONVERGED ||
+                             it->attempts >= m_config.loop_retry_max_attempts;
+        if (give_up) {
+            it = m_loop_retry_queue.erase(it);
+        } else {
+            it->last_recorded_score = std::min(it->last_recorded_score, eval.combined_score);
+            ++it;
+        }
+    }
+
+    return false;
+}
+
+void SimplePGO::appendLoopMetrics(const LoopPair& pair)
+{
+    LoopQualityMetrics metrics;
+    metrics.inlier_ratio = pair.inlier_ratio;
+    metrics.fitness = pair.fitness;
+    metrics.combined_score = pair.combined_score;
+    m_recent_loop_metrics.push_back(metrics);
+    while (m_recent_loop_metrics.size() > kRecentLoopMetricsCapacity) {
+        m_recent_loop_metrics.pop_front();
+    }
+}
+
 void SimplePGO::searchForLoopPairs()
 {
     if (m_key_poses.size() < 10)
@@ -161,18 +320,31 @@ void SimplePGO::searchForLoopPairs()
         return;
 
     // 收集候选（按时间间隔与索引间隔过滤）
-    std::vector<int> cand_idxs;
-    cand_idxs.reserve(ids.size());
-    for (size_t i = 0; i < ids.size(); ++i)
+    std::vector<int> candidate_indices;
+    candidate_indices.reserve(ids.size());
+    for (int kd_index : ids)
     {
-        int kd_index = ids[i];
         if (kd_index < 0 || static_cast<size_t>(kd_index) >= m_kdtree_index_map.size()) continue;
-        int idx = m_kdtree_index_map[kd_index];
-        if (idx < 0 || idx >= static_cast<int>(m_key_poses.size()-1)) continue;
-        if (static_cast<int>(cur_idx) - idx < m_config.min_index_separation) continue; // 索引间隔
-        if (std::abs(last_item.time - m_key_poses[idx].time) <= m_config.loop_time_tresh) continue; // 时间隔离
-        cand_idxs.push_back(idx);
-        if (static_cast<int>(cand_idxs.size()) >= m_config.max_candidates) break;
+        candidate_indices.push_back(m_kdtree_index_map[kd_index]);
+    }
+
+    std::vector<int> cand_idxs;
+    cand_idxs.reserve(candidate_indices.size());
+    auto is_valid_candidate = [&](int idx) {
+        if (idx < 0 || idx >= static_cast<int>(m_key_poses.size() - 1)) return false;
+        if (static_cast<int>(cur_idx) - idx < m_config.min_index_separation) return false;
+        if (std::abs(last_item.time - m_key_poses[idx].time) <= m_config.loop_time_tresh) return false;
+        return true;
+    };
+
+    std::copy_if(candidate_indices.begin(),
+                 candidate_indices.end(),
+                 std::back_inserter(cand_idxs),
+                 is_valid_candidate);
+
+    if (m_config.max_candidates > 0 && cand_idxs.size() > static_cast<size_t>(m_config.max_candidates))
+    {
+        cand_idxs.resize(static_cast<size_t>(m_config.max_candidates));
     }
 
     if (cand_idxs.empty()) return;
@@ -181,54 +353,52 @@ void SimplePGO::searchForLoopPairs()
     CloudType::Ptr source_cloud = getSubMap(static_cast<int>(cur_idx), 0, m_config.submap_resolution);
 
     double best_score = std::numeric_limits<double>::infinity();
-    int best_idx = -1;
-    M4F best_tf = M4F::Identity();
+    bool has_best = false;
+    LoopPair best_pair;
+    const double current_time = last_item.time;
 
     for (int loop_idx : cand_idxs)
     {
         if (isRecentPair(loop_idx, cur_idx)) continue; // 去重
 
-        CloudType::Ptr target_cloud = getSubMap(loop_idx, m_config.loop_submap_half_range, m_config.submap_resolution);
-        CloudType::Ptr aligned(new CloudType);
-
-        m_icp.setMaxCorrespondenceDistance(m_config.icp_max_distance);
-        m_icp.setInputSource(source_cloud);
-        m_icp.setInputTarget(target_cloud);
-        m_icp.align(*aligned);
-
-        if (!m_icp.hasConverged()) continue;
-
-        double fitness = m_icp.getFitnessScore();
-        if (fitness > m_config.loop_score_tresh) continue; // 粗滤
-
-        // 计算内点比例（几何验证）
-        double inlier_ratio = computeInlierRatio(aligned, target_cloud, m_config.inlier_threshold);
-        if (inlier_ratio < m_config.min_inlier_ratio) continue;
-
-        // 组合评分：更小更好（用于噪声建模）
-        double combined = fitness / std::max(1e-3, inlier_ratio);
-        if (combined < best_score)
+        auto eval = evaluateLoopCandidate(cur_idx, loop_idx, source_cloud, 1.0, 1.0);
+        if (eval.success)
         {
-            best_score = combined;
-            best_idx = loop_idx;
-            best_tf = m_icp.getFinalTransformation();
+            if (!has_best || eval.combined_score < best_score)
+            {
+                best_score = eval.combined_score;
+                best_pair = eval.pair;
+                has_best = true;
+            }
+            auto erase_it = std::remove_if(m_loop_retry_queue.begin(),
+                                           m_loop_retry_queue.end(),
+                                           [target = eval.pair.target_id](const LoopRetryEntry& entry) {
+                                               return entry.target_id == target;
+                                           });
+            if (erase_it != m_loop_retry_queue.end()) {
+                m_loop_retry_queue.erase(erase_it, m_loop_retry_queue.end());
+            }
+        }
+        else
+        {
+            registerLoopRetryCandidate(loop_idx, current_time, eval);
         }
     }
 
-    if (best_idx == -1) return;
+    if (!has_best)
+    {
+        if (!tryRetryCandidates(cur_idx, source_cloud, current_time, best_pair, best_score))
+        {
+            return;
+        }
+        has_best = true;
+    }
 
-    // 构造并缓存最优回环对
-    LoopPair one_pair;
-    one_pair.source_id = cur_idx;
-    one_pair.target_id = static_cast<size_t>(best_idx);
-    one_pair.score = std::max(1e-4, best_score); // 用于方差缩放
-    M3D r_refined = best_tf.block<3, 3>(0, 0).cast<double>() * m_key_poses[cur_idx].r_global;
-    V3D t_refined = best_tf.block<3, 3>(0, 0).cast<double>() * m_key_poses[cur_idx].t_global + best_tf.block<3, 1>(0, 3).cast<double>();
-    one_pair.r_offset = m_key_poses[best_idx].r_global.transpose() * r_refined;
-    one_pair.t_offset = m_key_poses[best_idx].r_global.transpose() * (t_refined - m_key_poses[best_idx].t_global);
-    m_cache_pairs.push_back(one_pair);
-    m_history_pairs.emplace_back(one_pair.target_id, one_pair.source_id);
-    recordRecentPair(one_pair.target_id, one_pair.source_id);
+    if (!has_best) return;
+
+    m_cache_pairs.push_back(best_pair);
+    m_history_pairs.emplace_back(best_pair.target_id, best_pair.source_id);
+    recordRecentPair(best_pair.target_id, best_pair.source_id);
 }
 
 bool SimplePGO::smoothAndUpdate()
@@ -239,10 +409,14 @@ bool SimplePGO::smoothAndUpdate()
     {
         for (LoopPair &pair : m_cache_pairs)
         {
+            appendLoopMetrics(pair);
+            gtsam::Vector6 variances;
+            variances.head<3>() = gtsam::Vector3::Ones() * (pair.score * 0.5);
+            variances.tail<3>() = gtsam::Vector3::Ones() * (pair.score * 2.0);
             m_graph.add(gtsam::BetweenFactor<gtsam::Pose3>(pair.target_id, pair.source_id,
                                                            gtsam::Pose3(gtsam::Rot3(pair.r_offset),
                                                                         gtsam::Point3(pair.t_offset)),
-                                                           gtsam::noiseModel::Diagonal::Variances(gtsam::Vector6::Ones() * pair.score)));
+                                                           gtsam::noiseModel::Diagonal::Variances(variances)));
         }
         std::vector<LoopPair>().swap(m_cache_pairs);
     }

@@ -7,6 +7,7 @@
 #include <pcl/point_types.h>
 #include <deque>
 #include <list>
+#include <limits>
 #include <unordered_map>
 #include <gtsam/geometry/Rot3.h>
 #include <gtsam/geometry/Pose3.h>
@@ -32,6 +33,9 @@ struct LoopPair
     M3D r_offset;
     V3D t_offset;
     double score;
+    double inlier_ratio = 0.0;
+    double fitness = 0.0;
+    double combined_score = 0.0;
 };
 
 struct Config
@@ -57,6 +61,11 @@ struct Config
     double icp_euclidean_fitness_epsilon = 1e-6; // ICP误差收敛阈值
     double isam_relinearize_threshold = 0.01; // iSAM2 relinearize 阈值
     int isam_relinearize_skip = 1;            // iSAM2 relinearize 间隔
+    int loop_retry_max_attempts = 3;          // 回环重试最大次数
+    double loop_retry_interval = 5.0;         // 重试时间间隔(秒)
+    size_t loop_retry_capacity = 32;          // 重试候选缓存上限
+    double loop_retry_score_relax = 1.5;      // 重试时得分阈值放宽倍数
+    double loop_retry_inlier_relax = 0.7;     // 重试时内点比例放宽倍数
 };
 
 struct PoseUpdate
@@ -86,6 +95,12 @@ public:
     CloudType::Ptr getSubMap(int idx, int half_range, double resolution);
     std::vector<std::pair<size_t, size_t>> &historyPairs() { return m_history_pairs; }
     std::vector<KeyPoseWithCloud> &keyPoses() { return m_key_poses; }
+    struct LoopQualityMetrics {
+        double inlier_ratio = 0.0;
+        double fitness = 0.0;
+        double combined_score = 0.0;
+    };
+    const std::deque<LoopQualityMetrics>& recentLoopMetrics() const { return m_recent_loop_metrics; }
 
     M3D offsetR() { return m_r_offset; }
     V3D offsetT() { return m_t_offset; }
@@ -97,12 +112,36 @@ private:
     std::vector<LoopPair> m_cache_pairs;
     std::deque<std::pair<size_t,size_t>> m_recent_added_pairs; // 约束去重辅助
     static constexpr size_t kRecentPairsCapacity = 1024;
+    static constexpr size_t kRecentLoopMetricsCapacity = 64;
     M3D m_r_offset;
     V3D m_t_offset;
     std::shared_ptr<gtsam::ISAM2> m_isam2;
     gtsam::Values m_initial_values;
     gtsam::NonlinearFactorGraph m_graph;
     pcl::IterativeClosestPoint<PointType, PointType> m_icp;
+    struct LoopEvaluationResult {
+        enum class FailureReason {
+            NONE,
+            ICP_NOT_CONVERGED,
+            FITNESS_THRESHOLD,
+            INLIER_THRESHOLD
+        };
+        bool success = false;
+        double combined_score = std::numeric_limits<double>::infinity();
+        double fitness = std::numeric_limits<double>::infinity();
+        double inlier_ratio = 0.0;
+        LoopPair pair{};
+        FailureReason failure_reason = FailureReason::NONE;
+    };
+    struct LoopRetryEntry {
+        size_t target_id = 0;
+        int attempts = 0;
+        double last_attempt_time = 0.0;
+        double last_recorded_score = std::numeric_limits<double>::infinity();
+    };
+
+    std::deque<LoopRetryEntry> m_loop_retry_queue;
+    std::deque<LoopQualityMetrics> m_recent_loop_metrics;
 
     // 几何验证辅助
     bool isRecentPair(size_t a, size_t b) const;
@@ -110,6 +149,20 @@ private:
     double computeInlierRatio(const CloudType::Ptr& src_aligned,
                               const CloudType::Ptr& tgt,
                               double dist_thresh) const;
+    void registerLoopRetryCandidate(int loop_idx,
+                                    double current_time,
+                                    const LoopEvaluationResult& eval);
+    bool tryRetryCandidates(size_t cur_idx,
+                            const CloudType::Ptr& source_cloud,
+                            double current_time,
+                            LoopPair& out_pair,
+                            double& out_score);
+    LoopEvaluationResult evaluateLoopCandidate(size_t cur_idx,
+                                               int loop_idx,
+                                               const CloudType::Ptr& source_cloud,
+                                               double score_relax_factor,
+                                               double inlier_relax_factor);
+    void appendLoopMetrics(const LoopPair& pair);
 
     // 关键帧位姿KD树缓存
     void updateKeyPoseKdTree(size_t current_idx);

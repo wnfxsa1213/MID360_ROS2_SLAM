@@ -12,6 +12,7 @@ find_package(std_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(nav_msgs REQUIRED)
 find_package(interface REQUIRED)
+find_package(diagnostic_msgs REQUIRED)
 find_package(Eigen3 REQUIRED)
 
 # 添加可执行文件
@@ -24,6 +25,7 @@ ament_target_dependencies(optimization_coordinator
   geometry_msgs
   nav_msgs
   interface
+  diagnostic_msgs
 )
 
 if(Eigen3_FOUND)

@@ -33,6 +33,7 @@ find_package(yaml-cpp REQUIRED)
 include_directories(
   ${EIGEN3_INCLUDE_DIR}
   ${PCL_INCLUDE_DIRS}
+  ${CMAKE_CURRENT_SOURCE_DIR}/../interface/include
 )
 
 
@@ -53,6 +54,7 @@ install(DIRECTORY rviz DESTINATION share/${PROJECT_NAME})
 
 if(BUILD_TESTING)
   find_package(ament_lint_auto REQUIRED)
+  find_package(ament_cmake_gtest REQUIRED)
   # the following line skips the linter which checks for copyrights
   # comment the line when a copyright and license is added to all source files
   set(ament_cmake_copyright_FOUND TRUE)
@@ -61,6 +63,16 @@ if(BUILD_TESTING)
   # a copyright and license is added to all source files
   set(ament_cmake_cpplint_FOUND TRUE)
   ament_lint_auto_find_test_dependencies()
+
+  ament_add_gtest(test_dynamic_filter_config
+    test/test_dynamic_filter_config.cpp
+    src/localizers/dynamic_object_filter.cpp)
+  target_link_libraries(test_dynamic_filter_config ${PCL_LIBRARIES})
+  ament_target_dependencies(test_dynamic_filter_config yaml-cpp)
+  target_include_directories(test_dynamic_filter_config PRIVATE
+    ${EIGEN3_INCLUDE_DIR}
+    ${PCL_INCLUDE_DIRS}
+    ${CMAKE_CURRENT_SOURCE_DIR}/src)
 endif()
 
 ament_package()

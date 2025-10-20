@@ -144,6 +144,7 @@ pgo:
   odom_topic: /slam/lio_odom
   map_frame: map
   local_frame: lidar
+  log_level: INFO
   key_pose_delta_deg: 10
   key_pose_delta_trans: 0.3
   loop_search_radius: 5.0
@@ -152,6 +153,13 @@ pgo:
   loop_submap_half_range: 5
   submap_resolution: 0.1
   min_loop_detect_duration: 2.0
+  isam_relinearize_threshold: 0.01
+  isam_relinearize_skip: 1
+  loop_retry_max_attempts: 3
+  loop_retry_interval: 5.0
+  loop_retry_capacity: 32
+  loop_retry_score_relax: 1.5
+  loop_retry_inlier_relax: 0.7
 hba:
   scan_resolution: 0.1
   window_size: 20
@@ -198,7 +206,10 @@ cooperation:
   enable: true
   drift_threshold: 0.5
   time_threshold: 60.0
+  service_timeout_ms: 3000
+  hba_maps_path: /tmp/current_map.pcd
   emergency_threshold: 2.0
+  emergency_failure_threshold: 3
   auto_optimization: true
   multi_agent:
     max_agents: 4

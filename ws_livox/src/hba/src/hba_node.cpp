@@ -16,10 +16,12 @@
 #include <unordered_set>
 
 #include <geometry_msgs/msg/pose_array.hpp>
+#include <std_msgs/msg/float32.hpp>
 
 #include "interface/srv/refine_map.hpp"
 #include "interface/srv/save_poses.hpp"
 #include "interface/srv/incremental_refine.hpp"
+#include "interface/error_codes.hpp"
 
 using namespace std::chrono_literals;
 void fromStr(const std::string &str, std::string &file_name, Pose &pose)
@@ -61,6 +63,7 @@ public:
             "hba/incremental_refine",
             std::bind(&HBANode::incrementalRefineCB, this, std::placeholders::_1, std::placeholders::_2));
         m_cloud_pub = this->create_publisher<sensor_msgs::msg::PointCloud2>("hba/map_points", 10);
+        m_progress_pub = this->create_publisher<std_msgs::msg::Float32>("hba/progress", 10);
     }
 
     void loadParameters()
@@ -93,9 +96,11 @@ public:
     {
         std::lock_guard<std::mutex> lock(m_service_mutex);
         try {
+            using interface::errors::Code;
+            using interface::errors::format;
             if (!std::filesystem::exists(request->maps_path)) {
                 response->success = false;
-                response->message = "maps_path not exists";
+                response->message = format(Code::FILE_NOT_FOUND, "maps_path not exists");
                 return;
             }
 
@@ -105,14 +110,14 @@ public:
             std::filesystem::path pcd_dir = p_dir / "patches";
             if (!std::filesystem::exists(pcd_dir)) {
                 response->success = false;
-                response->message = pcd_dir.string() + " not exists";
+                response->message = format(Code::FILE_NOT_FOUND, pcd_dir.string() + " not exists");
                 return;
             }
 
             std::filesystem::path txt_file = p_dir / "poses.txt";
             if (!std::filesystem::exists(txt_file)) {
                 response->success = false;
-                response->message = txt_file.string() + " not exists";
+                response->message = format(Code::FILE_NOT_FOUND, txt_file.string() + " not exists");
                 return;
             }
 
@@ -148,7 +153,7 @@ public:
 
             if (m_hba->poses().empty()) {
                 response->success = false;
-                response->message = "poses.txt loaded no valid entries";
+                response->message = format(Code::DATA_MISMATCH, "poses.txt loaded no valid entries");
                 return;
             }
 
@@ -159,12 +164,24 @@ public:
             std::vector<double> translation_errors;
             std::vector<double> rotation_errors;
 
+            auto publish_progress = [&](float value) {
+                if (!m_progress_pub || m_progress_pub->get_subscription_count() == 0) {
+                    return;
+                }
+                std_msgs::msg::Float32 msg;
+                msg.data = std::clamp(value, 0.0f, 1.0f);
+                m_progress_pub->publish(msg);
+            };
+
+            publish_progress(0.0f);
+
             auto start_time = std::chrono::steady_clock::now();
             for (size_t iter = 0; iter < m_hba_config.hba_iter; ++iter) {
                 RCLCPP_INFO(this->get_logger(), "======HBA ITER %lu START======", iter + 1);
                 m_hba->optimize();
                 iterations_used++;
                 RCLCPP_INFO(this->get_logger(), "======HBA ITER %lu END========", iter + 1);
+                publish_progress(static_cast<float>(iter + 1) / std::max<size_t>(1, m_hba_config.hba_iter));
             }
             auto end_time = std::chrono::steady_clock::now();
 
@@ -179,7 +196,7 @@ public:
             response->iterations_used = iterations_used;
             response->final_residual = final_residual;
             response->success = true;
-            response->message = "HBA optimization completed";
+            response->message = format(Code::SUCCESS, "HBA optimization completed");
 
             RCLCPP_INFO(this->get_logger(),
                         "HBA optimization finished in %.2fs, residual: %.6f",
@@ -187,10 +204,13 @@ public:
                         final_residual);
 
             publishMap();
+            publish_progress(1.0f);
         } catch (const std::exception& e) {
             response->success = false;
-            response->message = std::string("HBA optimization exception: ") + e.what();
-            RCLCPP_ERROR(this->get_logger(), "HBA optimization exception: %s", e.what());
+            auto formatted = interface::errors::format(interface::errors::Code::OPTIMIZATION_FAILED,
+                                                       e.what());
+            response->message = formatted;
+            RCLCPP_ERROR(this->get_logger(), "%s", formatted.c_str());
         }
     }
 
@@ -199,17 +219,30 @@ public:
     {
         std::lock_guard<std::mutex> lock(m_service_mutex);
         try {
+            using interface::errors::Code;
+            using interface::errors::format;
             const size_t pose_count = request->keyframe_poses.poses.size();
             if (pose_count == 0) {
                 response->success = false;
-                response->message = "request contains no keyframes";
+                response->message = format(Code::INVALID_CONFIGURATION, "request contains no keyframes");
                 return;
             }
+
+            auto publish_progress = [&](float value) {
+                if (!m_progress_pub || m_progress_pub->get_subscription_count() == 0) {
+                    return;
+                }
+                std_msgs::msg::Float32 msg;
+                msg.data = std::clamp(value, 0.0f, 1.0f);
+                m_progress_pub->publish(msg);
+            };
+
+            publish_progress(0.0f);
 
             if (pose_count != request->keyframe_clouds.size() ||
                 pose_count != request->keyframe_indices.size()) {
                 response->success = false;
-                response->message = "poses, clouds and indices size mismatch";
+                response->message = format(Code::DATA_MISMATCH, "poses, clouds and indices size mismatch");
                 return;
             }
 
@@ -237,7 +270,7 @@ public:
 
             if (m_hba->poses().empty()) {
                 response->success = false;
-                response->message = "HBA holds no keyframes";
+                response->message = format(Code::DATA_MISMATCH, "HBA holds no keyframes");
                 return;
             }
 
@@ -247,7 +280,7 @@ public:
                 response->iterations_used = 0;
                 response->final_residual = 0.0;
                 response->success = true;
-                response->message = "no new keyframes provided";
+                response->message = format(Code::SUCCESS, "no new keyframes provided");
                 return;
             }
 
@@ -263,6 +296,7 @@ public:
                 for (int iter = 0; iter < iterations_target; ++iter) {
                     m_hba->optimize();
                     iterations_used++;
+                    publish_progress(static_cast<float>(iter + 1) / std::max(1, iterations_target));
                 }
                 final_residual = computePoseResiduals(initial_poses, m_hba->poses(),
                                                       translation_errors, rotation_errors);
@@ -276,15 +310,21 @@ public:
             response->iterations_used = iterations_used;
             response->final_residual = final_residual;
             response->success = true;
-            response->message = request->run_optimization ? "HBA incremental refinement completed" : "HBA keyframes updated";
+            response->message = request->run_optimization ?
+                format(Code::SUCCESS, "HBA incremental refinement completed") :
+                format(Code::SUCCESS, "HBA keyframes updated");
 
             if (request->run_optimization && iterations_used > 0) {
                 publishMap();
             }
+
+            publish_progress(1.0f);
         } catch (const std::exception &e) {
             response->success = false;
-            response->message = std::string("Incremental refine exception: ") + e.what();
-            RCLCPP_ERROR(this->get_logger(), "Incremental refine exception: %s", e.what());
+            auto formatted = interface::errors::format(interface::errors::Code::OPTIMIZATION_FAILED,
+                                                       e.what());
+            response->message = formatted;
+            RCLCPP_ERROR(this->get_logger(), "%s", formatted.c_str());
         }
     }
 
@@ -296,13 +336,15 @@ public:
         if (!std::filesystem::exists(par_path))
         {
             response->success = false;
-            response->message = "parent path not exists";
+            response->message = interface::errors::format(interface::errors::Code::FILE_NOT_FOUND,
+                                                          "parent path not exists");
             return;
         }
         if (m_hba->poses().size() < 1)
         {
             response->success = false;
-            response->message = "poses is empty";
+            response->message = interface::errors::format(interface::errors::Code::DATA_MISMATCH,
+                                                          "poses is empty");
             return;
         }
 
@@ -313,7 +355,7 @@ public:
 
         m_hba->writePoses(file_path);
         response->success = true;
-        response->message = "save poses success!";
+        response->message = interface::errors::format(interface::errors::Code::SUCCESS, "save poses success");
         return;
     }
 
@@ -436,6 +478,7 @@ private:
     rclcpp::Service<interface::srv::IncrementalRefine>::SharedPtr m_incremental_refine_srv;
 
     rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr m_cloud_pub;
+    rclcpp::Publisher<std_msgs::msg::Float32>::SharedPtr m_progress_pub;
 
     pcl::VoxelGrid<pcl::PointXYZI> m_voxel_grid;
     std::mutex m_service_mutex;

@@ -239,14 +239,24 @@ public:
      */
     void setDebugMode(bool enable);
 
+    static std::vector<std::string> sanitizeConfig(DynamicFilterConfig& config);
+
 private:
     struct KdTreeCacheEntry {
         pcl::KdTreeFLANN<PointType>::Ptr tree;
         CloudType::Ptr cloud;
     };
 
+    enum class EnvironmentProfile {
+        UNKNOWN,
+        INDOOR,
+        OUTDOOR
+    };
+
     // 配置和状态
-    DynamicFilterConfig config_;           ///< 过滤器配置
+    DynamicFilterConfig config_;           ///< 基础配置（静态）
+    DynamicFilterConfig frame_config_;     ///< 当前帧适配后的配置
+    EnvironmentProfile last_environment_profile_ = EnvironmentProfile::UNKNOWN;
     mutable FilterMutex mutex_;            ///< 线程安全锁
     mutable std::deque<KdTreeCacheEntry> history_kdtree_cache_;
     bool initialized_;                     ///< 初始化状态
@@ -392,6 +402,9 @@ private:
 
     pcl::KdTreeFLANN<PointType>::Ptr getOrCreateHistoryKdTree(const CloudType::Ptr& cloud) const;
     void pruneHistoryKdTreeCache() const;
+
+    EnvironmentProfile classifyEnvironment(const CloudType::Ptr& cloud) const;
+    void applyAdaptiveThresholds(const CloudType::Ptr& cloud);
 
     // ================ 性能和调试 ================
 

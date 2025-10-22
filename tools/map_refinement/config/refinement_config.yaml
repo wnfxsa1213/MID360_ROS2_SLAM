@@ -267,6 +267,26 @@ density_uniformization:
   # "nearest": 最近邻 - 保持原始特征
   interpolation_method: "linear"
 
+  # 密度计算模式
+  # kd_tree：共享KDTree并并行查询（默认，精确但较慢）
+  # voxel：先体素聚合后近似回映射，速度最快精度略低
+  # hybrid：使用 Open3D KDTreeFlann + Hybrid 搜索
+  # gpu：使用 CuPy + cuML（需安装CUDA依赖）
+  mode: "kd_tree"
+
+  # 体素模式参数：voxel_size = radius / voxel_density_downsample
+  voxel_density_downsample: 2.0
+
+  # 体素邻域平滑层数（0=只使用当前体素，1=3x3x3）
+  voxel_neighbor_levels: 0
+
+  # Hybrid 模式参数：最大邻点数量和半径缩放
+  hybrid_knn: 64
+  hybrid_radius_scale: 1.0
+
+  # 是否在可用时启用GPU密度计算
+  use_gpu: false
+
 # ====================================================================
 # 9. 输出控制配置
 # ====================================================================
@@ -291,7 +311,7 @@ output:
 # 10. 性能优化配置
 # ====================================================================
 # 控制处理性能和资源使用 - 支持多线程并行处理优化
-performance:
+performance: 
   # 处理线程数 (建议范围: 2-8)
   # 数值越大：并行处理更快，但占用更多CPU
   # 数值越小：减少CPU占用，但处理较慢

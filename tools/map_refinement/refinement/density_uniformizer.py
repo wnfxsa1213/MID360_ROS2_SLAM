@@ -7,8 +7,8 @@ import multiprocessing
 import time
 import sys
 import os
+from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
-from sklearn.neighbors import NearestNeighbors
 from scipy.spatial import cKDTree, Voronoi
 from scipy.spatial.distance import cdist
 from scipy.interpolate import griddata
@@ -16,6 +16,13 @@ from scipy.interpolate import griddata
 # 添加父目录到路径以导入utils模块
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from utils.progress_manager import progress_bar, get_progress_manager
+
+try:
+    import cupy as cp  # type: ignore
+    from cuml.neighbors import NearestNeighbors  # type: ignore
+    _GPU_DENSITY_AVAILABLE = True
+except Exception:  # pragma: no cover - 可选依赖
+    _GPU_DENSITY_AVAILABLE = False
 """
 密度均匀化处理模块
 
@@ -70,6 +77,12 @@ class DensityUniformizer:
         self.adaptive_sampling = config.get('adaptive_sampling', True)
         self.hole_filling = config.get('hole_filling', True)
         self.interpolation_method = config.get('interpolation_method', 'linear')
+        self.mode = config.get('mode', 'kd_tree').lower()
+        self.voxel_density_downsample = config.get('voxel_density_downsample', 2.0)
+        self.voxel_neighbor_levels = int(config.get('voxel_neighbor_levels', 0))
+        self.hybrid_knn = int(config.get('hybrid_knn', 64))
+        self.hybrid_radius_scale = float(config.get('hybrid_radius_scale', 1.0))
+        self.use_gpu = bool(config.get('use_gpu', False))
         
         # 处理参数
         self.voxel_size = 0.05  # 默认体素大小
@@ -81,8 +94,16 @@ class DensityUniformizer:
         performance_config = config.get('performance', {})
         self.num_threads = performance_config.get('num_threads', min(8, multiprocessing.cpu_count()))
         self.num_threads = max(1, min(self.num_threads, multiprocessing.cpu_count()))
+        self._gpu_available = _GPU_DENSITY_AVAILABLE and self.use_gpu
 
-        logger.info(f"密度均匀化处理器初始化完成 - 线程数: {self.num_threads}")
+        if self.mode == 'gpu' and not self._gpu_available:
+            logger.warning("GPU 密度模式已请求但依赖不可用，回退至 kd_tree 模式")
+            self.mode = 'kd_tree'
+
+        logger.info(
+            f"密度均匀化处理器初始化完成 - 模式: {self.mode}, 线程数: {self.num_threads}, "
+            f"GPU可用: {self._gpu_available}"
+        )
         
     def compute_density_map(self, pcd: o3d.geometry.PointCloud, 
                           radius: float = None) -> np.ndarray:
@@ -105,18 +126,23 @@ class DensityUniformizer:
         if n_points == 0:
             return np.array([])
             
-        logger.info(f"开始计算密度分布 - 点数: {n_points}, 线程数: {self.num_threads}")
+        logger.info(f"开始计算密度分布 - 点数: {n_points}, 模式: {self.mode}")
         start_time = time.time()
 
-        # 根据点数选择处理策略
-        if n_points < 1000 or self.num_threads == 1:
-            densities = self._compute_density_single_thread(points, radius)
+        if self.mode == 'voxel':
+            densities = self._compute_density_voxel(points, radius)
+        elif self.mode == 'hybrid':
+            densities = self._compute_density_hybrid(pcd, radius)
+        elif self.mode == 'gpu' and self._gpu_available:
+            densities = self._compute_density_gpu(points, radius)
         else:
-            densities = self._compute_density_parallel(points, radius)
+            densities = self._compute_density_kdtree(points, radius)
 
         elapsed_time = time.time() - start_time
-        logger.info(f"密度分布计算完成，耗时: {elapsed_time:.2f}秒，"
-                   f"密度范围: [{np.min(densities):.1f}, {np.max(densities):.1f}]")
+        logger.info(
+            f"密度分布计算完成，耗时: {elapsed_time:.2f}秒，"
+            f"密度范围: [{np.min(densities):.1f}, {np.max(densities):.1f}]"
+        )
         
         return densities
         
@@ -703,65 +729,109 @@ class DensityUniformizer:
 
         return filled_pcd
 
-    def _compute_density_single_thread(self, points: np.ndarray, radius: float) -> np.ndarray:
+    def _compute_density_single_thread(self, points: np.ndarray, radius: float, kdtree: Optional[cKDTree] = None) -> np.ndarray:
         """单线程密度计算"""
-        import time
         start_time = time.time()
 
         logger.debug("使用单线程计算点密度")
-        n_points = len(points)
-        densities = np.zeros(n_points)
+        if kdtree is None:
+            kdtree = cKDTree(points)
 
-        # 构建KD树
-        kdtree = cKDTree(points)
-
-        # 逐点计算密度
-        for i in range(n_points):
-            neighbor_indices = kdtree.query_ball_point(points[i], radius)
-            densities[i] = len(neighbor_indices)
+        neighbors = kdtree.query_ball_point(points, radius)
+        densities = np.fromiter((len(nb) for nb in neighbors), dtype=np.int32)
 
         elapsed_time = time.time() - start_time
         logger.debug(f"单线程密度计算完成，耗时: {elapsed_time:.2f}秒")
 
         return densities
 
-    def _compute_density_parallel(self, points: np.ndarray, radius: float) -> np.ndarray:
-        """多线程密度计算"""
-        import time
-        start_time = time.time()
+    def _compute_chunk_density_kdtree(self, kdtree: cKDTree, points: np.ndarray, start_idx: int, end_idx: int, radius: float) -> Tuple[int, int, np.ndarray]:
+        neighbors = kdtree.query_ball_point(points[start_idx:end_idx], radius)
+        chunk_counts = np.fromiter((len(nb) for nb in neighbors), dtype=np.int32)
+        return start_idx, end_idx, chunk_counts
 
-        logger.debug(f"使用{self.num_threads}线程并行计算点密度")
+    def _compute_density_kdtree(self, points: np.ndarray, radius: float) -> np.ndarray:
         n_points = len(points)
-        chunk_size = max(10, n_points // self.num_threads)
-        chunks = [(i, min(i + chunk_size, n_points)) for i in range(0, n_points, chunk_size)]
+        kdtree = cKDTree(points)
 
-        densities = np.zeros(n_points)
+        if n_points < 50_000 or self.num_threads == 1:
+            return self._compute_density_single_thread(points, radius, kdtree)
 
-        def compute_chunk_density(chunk_info):
-            """计算数据块的密度"""
-            start_idx, end_idx = chunk_info
-            chunk_densities = []
+        chunk_size = max(2_000, n_points // (self.num_threads * 4))
+        indices = list(range(0, n_points, chunk_size))
+        chunks = [(start, min(start + chunk_size, n_points)) for start in indices]
 
-            # 每个线程创建自己的KD树
-            kdtree = cKDTree(points)
-
-            for i in range(start_idx, end_idx):
-                neighbor_indices = kdtree.query_ball_point(points[i], radius)
-                chunk_densities.append(len(neighbor_indices))
-
-            return start_idx, end_idx, chunk_densities
-
-        # 执行并行计算
+        densities = np.zeros(n_points, dtype=np.int32)
         with ThreadPoolExecutor(max_workers=self.num_threads) as executor:
-            futures = [executor.submit(compute_chunk_density, chunk) for chunk in chunks]
-
-            with progress_bar(len(chunks), "密度计算", unit="块") as pbar:
+            futures = [
+                executor.submit(self._compute_chunk_density_kdtree, kdtree, points, start_idx, end_idx, radius)
+                for start_idx, end_idx in chunks
+            ]
+            with progress_bar(len(futures), "密度计算", unit="块") as pbar:
                 for future in futures:
-                    start_idx, end_idx, chunk_densities = future.result()
-                    densities[start_idx:end_idx] = chunk_densities
+                    start_idx, end_idx, chunk_counts = future.result()
+                    densities[start_idx:end_idx] = chunk_counts
                     pbar.update(1)
 
-        elapsed_time = time.time() - start_time
-        logger.debug(f"并行密度计算完成: {n_points}个点，{self.num_threads}线程，耗时{elapsed_time:.2f}秒")
-
         return densities
+
+    def _aggregate_voxel_neighbors(self, unique_keys: np.ndarray, counts: np.ndarray) -> np.ndarray:
+        if self.voxel_neighbor_levels <= 0:
+            return counts
+        offsets = [
+            (dx, dy, dz)
+            for dx in range(-self.voxel_neighbor_levels, self.voxel_neighbor_levels + 1)
+            for dy in range(-self.voxel_neighbor_levels, self.voxel_neighbor_levels + 1)
+            for dz in range(-self.voxel_neighbor_levels, self.voxel_neighbor_levels + 1)
+        ]
+        counts_map = {tuple(key): counts[idx] for idx, key in enumerate(unique_keys)}
+        smoothed = np.empty_like(counts)
+        for idx, key in enumerate(unique_keys):
+            total = 0
+            kx, ky, kz = key
+            for dx, dy, dz in offsets:
+                neighbor = (kx + dx, ky + dy, kz + dz)
+                total += counts_map.get(neighbor, 0)
+            smoothed[idx] = total
+        return smoothed
+
+    def _compute_density_voxel(self, points: np.ndarray, radius: float) -> np.ndarray:
+        voxel_size = max(self.voxel_size, radius / max(self.voxel_density_downsample, 1.0))
+        scaled = np.floor(points / voxel_size).astype(np.int64)
+        unique_keys, inverse, counts = np.unique(scaled, axis=0, return_inverse=True, return_counts=True)
+        counts = self._aggregate_voxel_neighbors(unique_keys, counts)
+        densities = counts[inverse]
+        logger.debug(
+            "体素近似密度计算完成: voxel_size=%.4f, unique_voxels=%d",
+            voxel_size,
+            len(unique_keys),
+        )
+        return densities.astype(np.int32)
+
+    def _compute_density_hybrid(self, pcd: o3d.geometry.PointCloud, radius: float) -> np.ndarray:
+        tree = o3d.geometry.KDTreeFlann(pcd)
+        search_radius = float(radius) * max(1.0, self.hybrid_radius_scale)
+        max_knn = max(1, self.hybrid_knn)
+        n_points = len(pcd.points)
+        densities = np.zeros(n_points, dtype=np.int32)
+        with progress_bar(n_points, "密度计算", unit="点", leave=False) as pbar:
+            for idx in range(n_points):
+                k, _, _ = tree.search_hybrid_vector_3d(pcd.points[idx], search_radius, max_knn)
+                densities[idx] = k
+                pbar.update(1)
+        return densities
+
+    def _compute_density_gpu(self, points: np.ndarray, radius: float) -> np.ndarray:
+        if not self._gpu_available:
+            logger.warning("GPU 密度计算不可用，回退至 kd_tree 模式")
+            return self._compute_density_kdtree(points, radius)
+        try:
+            xp_points = cp.asarray(points)
+            nn = NearestNeighbors()
+            nn.fit(xp_points)
+            indices = nn.radius_neighbors(xp_points, radius=radius, return_distance=False)
+            densities = np.array([row.shape[0] for row in indices], dtype=np.int32)
+            return densities
+        except Exception as exc:
+            logger.warning(f"GPU 密度计算失败: {exc}，回退至 kd_tree")
+            return self._compute_density_kdtree(points, radius)

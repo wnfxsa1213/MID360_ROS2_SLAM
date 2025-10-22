@@ -53,7 +53,7 @@ frames:
   lidar_frame: livox_frame
 topics:
   imu: /livox/imu
-  lidar: /livox/lidar
+  lidar: /livox/lidar_filtered
   odometry: /slam/lio_odom
   path: /slam/lio_path
   body_cloud: /slam/body_cloud
@@ -103,7 +103,7 @@ fastlio2:
     max_imu_buffer_size: 8000
     max_lidar_buffer_size: 1000
     enable_buffer_monitoring: true
-  lidar_topic: /livox/lidar
+  lidar_topic: /livox/lidar_filtered
   imu_topic: /livox/imu
 visualization:
   rviz:
@@ -140,7 +140,7 @@ monitoring:
     level: INFO
     verbose: false
 pgo:
-  cloud_topic: /localizer/filtered_cloud
+  cloud_topic: /slam/body_cloud
   odom_topic: /slam/lio_odom
   map_frame: map
   local_frame: lidar
@@ -188,7 +188,7 @@ localizer:
     max_iteration: 10
     score_thresh: 0.1
   dynamic_filter:
-    enable: true
+    enable: false
     publish_stats: true
     max_processing_hz: 20.0
     motion_threshold: 0.1

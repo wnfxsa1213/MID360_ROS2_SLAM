@@ -26,7 +26,7 @@
 import argparse
 import os
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Optional
 
 import numpy as np
 import open3d as o3d
@@ -95,19 +95,39 @@ def numeric_key_for_filename(p: Path) -> Tuple[int, str]:
         return (2**31 - 1), stem
 
 
-def transform_points(points: np.ndarray, R: np.ndarray, t: np.ndarray) -> np.ndarray:
-    return (points @ R.T) + t.reshape(1, 3)
+def load_point_cloud(path: Path) -> o3d.geometry.PointCloud:
+    """加载补丁点云."""
+    return o3d.io.read_point_cloud(str(path))
 
 
-def load_point_cloud_points(path: Path) -> np.ndarray:
-    pc = o3d.io.read_point_cloud(str(path))
-    return np.asarray(pc.points, dtype=np.float64)
+def transform_point_cloud(pcd: o3d.geometry.PointCloud, R: np.ndarray, t: np.ndarray) -> o3d.geometry.PointCloud:
+    """对点云应用旋转和平移，返回新的点云对象。"""
+    if pcd.is_empty():
+        return o3d.geometry.PointCloud()
+
+    transformed = o3d.geometry.PointCloud()
+    points = np.asarray(pcd.points, dtype=np.float64)
+    transformed_points = (points @ R.T) + t.reshape(1, 3)
+    transformed.points = o3d.utility.Vector3dVector(transformed_points)
+
+    if pcd.has_colors():
+        transformed.colors = o3d.utility.Vector3dVector(np.asarray(pcd.colors, dtype=np.float64))
+
+    if pcd.has_normals():
+        normals = np.asarray(pcd.normals, dtype=np.float64)
+        rotated_normals = normals @ R.T
+        norms = np.linalg.norm(rotated_normals, axis=1, keepdims=True)
+        norms[norms == 0] = 1.0
+        transformed.normals = o3d.utility.Vector3dVector(rotated_normals / norms)
+
+    return transformed
 
 
-def save_point_cloud_points(path: Path, points: np.ndarray):
-    pc = o3d.geometry.PointCloud()
-    pc.points = o3d.utility.Vector3dVector(points.astype(np.float64))
-    o3d.io.write_point_cloud(str(path), pc, write_ascii=False, compressed=False)
+def save_point_cloud(path: Path, pcd: o3d.geometry.PointCloud) -> None:
+    """保存点云并在失败时抛出异常。"""
+    success = o3d.io.write_point_cloud(str(path), pcd, write_ascii=False, compressed=False)
+    if not success:
+        raise RuntimeError(f'保存点云失败: {path}')
 
 
 def reconstruct(patches_dir: Path, poses_path: Path, output_path: Path, downsample_voxel: float = 0.0):
@@ -124,8 +144,13 @@ def reconstruct(patches_dir: Path, poses_path: Path, output_path: Path, downsamp
         raise RuntimeError('未在 patches 目录中找到 .pcd/.ply 文件')
 
     # 预统计
-    total_points = 0
-    transformed_chunks: List[np.ndarray] = []
+    total_input_points = 0
+    processed_patches = 0
+    points_chunks: List[np.ndarray] = []
+    color_chunks: List[Optional[np.ndarray]] = []
+    normal_chunks: List[Optional[np.ndarray]] = []
+    any_colors = False
+    any_normals = False
 
     if name_to_pose:
         # 使用名字匹配
@@ -137,45 +162,69 @@ def reconstruct(patches_dir: Path, poses_path: Path, output_path: Path, downsamp
                 continue
             t, q = name_to_pose[key]
             R = quaternion_to_rotation_matrix(q)
-            pts = load_point_cloud_points(pf)
-            if pts.size == 0:
+            patch_cloud = load_point_cloud(pf)
+            if patch_cloud.is_empty():
                 continue
-            pts_w = transform_points(pts, R, t)
-            transformed_chunks.append(pts_w)
-            total_points += pts_w.shape[0]
+            total_input_points += len(patch_cloud.points)
+            transformed = transform_point_cloud(patch_cloud, R, t)
+            if transformed.is_empty():
+                continue
+            points_chunks.append(np.asarray(transformed.points, dtype=np.float64).copy())
+            color_chunks.append(np.asarray(transformed.colors, dtype=np.float64).copy() if transformed.has_colors() else None)
+            normal_chunks.append(np.asarray(transformed.normals, dtype=np.float64).copy() if transformed.has_normals() else None)
+            any_colors = any_colors or transformed.has_colors()
+            any_normals = any_normals or transformed.has_normals()
+            processed_patches += 1
         if missing:
             print(f'⚠️  有 {missing} 个patch在位姿文件中未找到对应条目（将被跳过）')
     else:
         # 按序对齐
         if len(list_poses) < len(patch_files):
             print(f'⚠️  位姿数量({len(list_poses)})少于patch数量({len(patch_files)}), 仅按最小数量对齐')
+        elif len(list_poses) > len(patch_files):
+            print(f'⚠️  位姿数量({len(list_poses)})多于patch数量({len(patch_files)}), 多余位姿将被忽略')
         n = min(len(list_poses), len(patch_files))
         for i in range(n):
             t, q = list_poses[i]
             R = quaternion_to_rotation_matrix(q)
-            pts = load_point_cloud_points(patch_files[i])
-            if pts.size == 0:
+            patch_cloud = load_point_cloud(patch_files[i])
+            if patch_cloud.is_empty():
                 continue
-            pts_w = transform_points(pts, R, t)
-            transformed_chunks.append(pts_w)
-            total_points += pts_w.shape[0]
+            total_input_points += len(patch_cloud.points)
+            transformed = transform_point_cloud(patch_cloud, R, t)
+            if transformed.is_empty():
+                continue
+            points_chunks.append(np.asarray(transformed.points, dtype=np.float64).copy())
+            color_chunks.append(np.asarray(transformed.colors, dtype=np.float64).copy() if transformed.has_colors() else None)
+            normal_chunks.append(np.asarray(transformed.normals, dtype=np.float64).copy() if transformed.has_normals() else None)
+            any_colors = any_colors or transformed.has_colors()
+            any_normals = any_normals or transformed.has_normals()
+            processed_patches += 1
 
-    if not transformed_chunks:
+    if not points_chunks:
         raise RuntimeError('没有有效的点可用于重建，请检查 patches 与 poses 对齐关系')
 
-    all_points = np.vstack(transformed_chunks)
-    print(f'✅ 重建完成，累计点数: {all_points.shape[0]}（拼接前总计 {total_points}）')
+    all_points = np.vstack(points_chunks)
+    combined_pcd = o3d.geometry.PointCloud()
+    combined_pcd.points = o3d.utility.Vector3dVector(all_points.astype(np.float64))
+
+    if any_colors and all(chunk is not None for chunk in color_chunks):
+        all_colors = np.vstack([chunk for chunk in color_chunks if chunk is not None])
+        combined_pcd.colors = o3d.utility.Vector3dVector(all_colors.astype(np.float64))
+
+    if any_normals and all(chunk is not None for chunk in normal_chunks):
+        all_normals = np.vstack([chunk for chunk in normal_chunks if chunk is not None])
+        combined_pcd.normals = o3d.utility.Vector3dVector(all_normals.astype(np.float64))
+
+    print(f'✅ 重建完成，累计点数: {len(combined_pcd.points)}（拼接前总计 {total_input_points}，有效补丁 {processed_patches} 个）')
 
     # 可选体素下采样
     if downsample_voxel and downsample_voxel > 0.0:
         print(f'🔧 体素下采样: voxel={downsample_voxel} m')
-        pc = o3d.geometry.PointCloud()
-        pc.points = o3d.utility.Vector3dVector(all_points)
-        pc = pc.voxel_down_sample(voxel_size=float(downsample_voxel))
-        all_points = np.asarray(pc.points)
-        print(f'   下采样后点数: {all_points.shape[0]}')
+        combined_pcd = combined_pcd.voxel_down_sample(voxel_size=float(downsample_voxel))
+        print(f'   下采样后点数: {len(combined_pcd.points)}')
 
-    save_point_cloud_points(output_path, all_points)
+    save_point_cloud(output_path, combined_pcd)
     print(f'💾 已保存重建地图: {output_path}')
 
 
@@ -213,4 +262,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-

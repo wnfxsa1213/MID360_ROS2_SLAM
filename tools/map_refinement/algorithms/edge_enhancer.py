@@ -266,63 +266,72 @@ class EdgeEnhancer:
         
         # 使用RANSAC检测线段
         line_features = []
-        remaining_indices = set(candidate_indices)
-        
+        # 使用布尔数组标记已使用的点，避免 set 转 list 的顺序不确定性
+        used_mask = np.zeros(len(candidate_indices), dtype=bool)
+
         max_lines = 20  # 最大线特征数
         for line_id in range(max_lines):
-            if len(remaining_indices) < self.line_feature_min_points:
+            # 获取未使用的候选点
+            available_mask = ~used_mask
+            available_count = np.sum(available_mask)
+
+            if available_count < self.line_feature_min_points:
                 break
-                
-            remaining_points = points[list(remaining_indices)]
-            
+
+            # 获取未使用点的索引（相对于 candidate_indices）
+            available_local_indices = np.where(available_mask)[0]
+            # 获取未使用点的全局索引（相对于原始点云）
+            available_global_indices = candidate_indices[available_local_indices]
+            remaining_points = points[available_global_indices]
+
             # RANSAC线拟合
             best_inliers = []
             best_score = 0
-            
+
             for _ in range(100):  # RANSAC迭代次数
                 if len(remaining_points) < 2:
                     break
-                    
+
                 # 随机选择两个点定义直线
                 sample_indices = np.random.choice(len(remaining_points), 2, replace=False)
                 p1, p2 = remaining_points[sample_indices]
-                
+
                 # 直线方向向量
                 line_direction = p2 - p1
                 line_direction_norm = np.linalg.norm(line_direction)
-                
+
                 if line_direction_norm < 1e-6:
                     continue
-                    
+
                 line_direction = line_direction / line_direction_norm
-                
+
                 # 计算所有点到直线的距离
                 point_to_line = remaining_points - p1
                 cross_products = np.cross(point_to_line, line_direction)
                 distances = np.linalg.norm(cross_products, axis=1)
-                
+
                 # 找到内点
                 inliers = distances < self.edge_search_radius
                 inlier_count = np.sum(inliers)
-                
+
                 if inlier_count > best_score and inlier_count >= self.line_feature_min_points:
                     best_score = inlier_count
                     best_inliers = np.where(inliers)[0]
-                    
+
             if len(best_inliers) >= self.line_feature_min_points:
-                # 创建线特征
-                line_point_indices = [list(remaining_indices)[i] for i in best_inliers]
-                line_points = points[line_point_indices]
-                line_curvatures = curvatures[line_point_indices]
-                
-                line_info = EdgeInfo(line_points, np.array(line_point_indices), 
+                # 创建线特征（best_inliers 是相对于 remaining_points 的索引）
+                line_global_indices = available_global_indices[best_inliers]
+                line_points = points[line_global_indices]
+                line_curvatures = curvatures[line_global_indices]
+
+                line_info = EdgeInfo(line_points, np.array(line_global_indices),
                                    line_curvatures, 'line')
                 line_features.append(line_info)
-                
-                # 从候选点中移除已使用的点
-                for idx in best_inliers:
-                    remaining_indices.discard(list(remaining_indices)[idx])
-                    
+
+                # 标记已使用的点（best_inliers 对应 available_local_indices）
+                used_local_indices = available_local_indices[best_inliers]
+                used_mask[used_local_indices] = True
+
                 logger.debug(f"检测到线特征 {line_id+1}: {len(best_inliers)} 个点")
             else:
                 break

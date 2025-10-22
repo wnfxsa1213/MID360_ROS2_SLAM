@@ -14,8 +14,6 @@ compile_commands.json
 *~
 AGENT_LOGS/
 AGENT.md
-AGENTS.md
-.claude
 
 
 # 数据文件
@@ -118,3 +116,4 @@ claude_temp_files/
 claude_cache/
 claude_sessions/
 claude_models/
+#codex相关

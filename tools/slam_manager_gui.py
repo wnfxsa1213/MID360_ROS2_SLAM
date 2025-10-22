@@ -29,6 +29,7 @@ from PyQt5.QtGui import QTextCursor
 from PyQt5.QtWidgets import (
     QApplication,
     QFileDialog,
+    QInputDialog,
     QFormLayout,
     QGridLayout,
     QGroupBox,
@@ -55,6 +56,8 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SLAM_TOOLS = PROJECT_ROOT / "tools" / "slam_tools.sh"
 MASTER_CONFIG = PROJECT_ROOT / "config" / "master_config.yaml"
 GRIDMAP_GUI = PROJECT_ROOT / "tools" / "gridmap_gui.py"
+MAP_REFINEMENT = PROJECT_ROOT / "tools" / "map_refinement.py"
+MAP_RECONSTRUCT = PROJECT_ROOT / "tools" / "reconstruct_map_from_patches.py"
 
 try:
     import rclpy
@@ -476,13 +479,25 @@ class SlamManagerWindow(QMainWindow):
 
         tool_box = QGroupBox("外部工具")
         tool_layout = QHBoxLayout(tool_box)
+
         btn_gridmap_gui = QPushButton("打开 Gridmap GUI")
         btn_gridmap_gui.clicked.connect(self.launch_gridmap_gui)
         tool_layout.addWidget(btn_gridmap_gui)
 
+        btn_map_refine = QPushButton("地图精修 (map_refinement)")
+        btn_map_refine.clicked.connect(self.launch_map_refinement)
+        tool_layout.addWidget(btn_map_refine)
+
+        btn_reconstruct = QPushButton("补丁重建 (reconstruct)")
+        btn_reconstruct.clicked.connect(self.launch_map_reconstruct)
+        tool_layout.addWidget(btn_reconstruct)
+
         layout.addWidget(tool_box)
 
-        info = QLabel("Gridmap GUI 依赖 PyQt5、OpenCV 等。默认读取 saved_maps/.pcd_index.json。")
+        info = QLabel(
+            "Gridmap GUI 依赖 PyQt5/OpenCV；地图精修与补丁重建会调用对应 Python 脚本，"
+            "需要提前准备好输入点云或 PGO 输出目录。"
+        )
         info.setWordWrap(True)
         layout.addWidget(info)
 
@@ -520,6 +535,160 @@ class SlamManagerWindow(QMainWindow):
             QMessageBox.warning(self, "提示", f"未找到 {GRIDMAP_GUI}")
             return
         subprocess.Popen([sys.executable, str(GRIDMAP_GUI)], cwd=PROJECT_ROOT)
+
+    def launch_map_refinement(self):
+        if not MAP_REFINEMENT.exists():
+            QMessageBox.warning(self, "提示", f"未找到 {MAP_REFINEMENT}")
+            return
+
+        input_file, _ = QFileDialog.getOpenFileName(
+            self,
+            "选择输入点云",
+            str((PROJECT_ROOT / "saved_maps").resolve()),
+            "Point Cloud (*.pcd *.ply);;All Files (*)",
+        )
+        if not input_file:
+            return
+
+        input_path = Path(input_file)
+        default_output = input_path.parent / f"{input_path.stem}_refined{input_path.suffix}"
+        output_file, _ = QFileDialog.getSaveFileName(
+            self,
+            "选择输出点云",
+            str(default_output),
+            "Point Cloud (*.pcd *.ply);;All Files (*)",
+        )
+        if not output_file:
+            return
+
+        pipelines = ["full", "basic", "denoise", "structure", "edges", "geometry", "surface", "details", "density"]
+        pipeline, ok = QInputDialog.getItem(
+            self,
+            "选择处理管道",
+            "处理管道：",
+            pipelines,
+            pipelines.index("full"),
+            False,
+        )
+        if not ok or not pipeline:
+            return
+
+        if Path(output_file).exists():
+            confirm = QMessageBox.question(
+                self,
+                "确认覆盖",
+                f"输出文件已存在，是否覆盖？\n{output_file}",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if confirm != QMessageBox.Yes:
+                return
+
+        quality_choice = QMessageBox.question(
+            self,
+            "质量报告",
+            "是否生成质量评估报告？",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.Yes,
+        )
+
+        cmd = [sys.executable, str(MAP_REFINEMENT), "--pipeline", pipeline]
+
+        sub_cmd = [
+            "refine",
+            input_file,
+            "--output",
+            output_file,
+            "--overwrite",
+        ]
+        if quality_choice == QMessageBox.Yes:
+            sub_cmd.append("--quality-report")
+
+        self.runner.run(cmd + sub_cmd, cwd=PROJECT_ROOT)
+
+    def launch_map_reconstruct(self):
+        if not MAP_RECONSTRUCT.exists():
+            QMessageBox.warning(self, "提示", f"未找到 {MAP_RECONSTRUCT}")
+            return
+
+        mode_options = ["PGO 目录（含 patches/poses.txt）", "补丁目录 + 自定义 poses"]
+        mode, ok = QInputDialog.getItem(
+            self,
+            "选择输入类型",
+            "请选择重建数据来源：",
+            mode_options,
+            0,
+            False,
+        )
+        if not ok or not mode:
+            return
+
+        args = [sys.executable, str(MAP_RECONSTRUCT)]
+
+        if mode == mode_options[0]:
+            pgo_dir = QFileDialog.getExistingDirectory(
+                self,
+                "选择 PGO 输出目录",
+                str((PROJECT_ROOT / "saved_maps").resolve()),
+            )
+            if not pgo_dir:
+                return
+            args.extend(["--pgo-dir", pgo_dir])
+            default_output = Path(pgo_dir).with_name(Path(pgo_dir).name + "_reconstructed.pcd")
+        else:
+            patches_dir = QFileDialog.getExistingDirectory(
+                self,
+                "选择 patches 目录",
+                str((PROJECT_ROOT / "saved_maps").resolve()),
+            )
+            if not patches_dir:
+                return
+            poses_file, _ = QFileDialog.getOpenFileName(
+                self,
+                "选择 poses.txt",
+                str(Path(patches_dir).parent),
+                "Text Files (*.txt);;All Files (*)",
+            )
+            if not poses_file:
+                return
+            args.extend(["--patches-dir", patches_dir, "--poses", poses_file])
+            default_output = Path(patches_dir).with_name(Path(patches_dir).name + "_reconstructed.pcd")
+
+        output_file, _ = QFileDialog.getSaveFileName(
+            self,
+            "选择输出点云",
+            str(default_output),
+            "Point Cloud (*.pcd *.ply);;All Files (*)",
+        )
+        if not output_file:
+            return
+
+        if Path(output_file).exists():
+            confirm = QMessageBox.question(
+                self,
+                "确认覆盖",
+                f"输出文件已存在，是否覆盖？\n{output_file}",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if confirm != QMessageBox.Yes:
+                return
+
+        voxel, voxel_ok = QInputDialog.getDouble(
+            self,
+            "体素下采样",
+            "体素大小 (米，0 表示不下采样)：",
+            0.0,
+            0.0,
+            1.0,
+            2,
+        )
+
+        args.extend(["--output", output_file])
+        if voxel_ok and voxel > 0.0:
+            args.extend(["--downsample-voxel", f"{voxel:.2f}"])
+
+        self.runner.run(args, cwd=PROJECT_ROOT)
 
     def append_log(self, text: str):
         self.log_edit.moveCursor(QTextCursor.End)

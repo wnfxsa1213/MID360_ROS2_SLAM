@@ -4,13 +4,15 @@ coordinator:
     time_threshold: 60.0
     emergency_threshold: 2.0
     auto_optimization: true
+    service_timeout_ms: 3000
+    emergency_failure_threshold: 3
+    hba_maps_path: /tmp/current_map.pcd
     enable_relocalization: true
-    drift_history_size: 20
     min_pose_delta: 0.03
     min_orientation_delta_deg: 0.5
     optimization_score_threshold: 0.6
+    drift_history_size: 20
     relocalization_score_threshold: 0.15
     relocalization_timeout_sec: 10.0
     relocalization_min_translation: 0.5
     relocalization_min_yaw: 5.0
-    client_timeout_sec: 3.0

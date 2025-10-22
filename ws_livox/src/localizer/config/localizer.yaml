@@ -1,13 +1,13 @@
 # Localizer配置文件
 # 由配置生成器自动生成，请勿手动修改
-# 生成时间: 2025-10-18 20:29:44
+# 生成时间: 2025-10-22 19:27:08
 # 主配置文件: /home/tianyu/codes/Mid360map/config/master_config.yaml
 
 cloud_topic: /slam/body_cloud
 dynamic_filter:
   density_ratio_thresh: 0.5
   downsample_ratio: 1
-  enable: true
+  enable: false
   history_size: 8
   max_points_per_frame: 60000
   max_processing_hz: 20.0

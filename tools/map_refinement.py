@@ -29,9 +29,10 @@ import argparse
 import logging
 import time
 from pathlib import Path
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Tuple
 import json
 import copy
+from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
 
 # 添加map_refinement模块到路径
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'map_refinement'))
@@ -58,29 +59,67 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+_CONFIG_CACHE: Dict[Tuple[str, float], Dict] = {}
+
+
+def _load_config_cached(path: str) -> Dict:
+    abs_path = os.path.abspath(path)
+    mtime = os.path.getmtime(abs_path)
+    cache_key = (abs_path, mtime)
+    if cache_key not in _CONFIG_CACHE:
+        config = PointCloudIO.load_config(abs_path)
+        _CONFIG_CACHE[cache_key] = config
+    return copy.deepcopy(_CONFIG_CACHE[cache_key])
+
+
+def _batch_process_worker(args):
+    (
+        config_dict,
+        input_file,
+        output_file,
+        pipeline_name,
+        overwrite,
+        dry_run,
+        save_intermediate,
+    ) = args
+    worker = MapRefinementPipeline(config_dict=config_dict)
+    return worker.process_single_cloud(
+        input_file,
+        output_file,
+        pipeline=pipeline_name,
+        save_intermediate=save_intermediate,
+        overwrite=overwrite,
+        dry_run=dry_run,
+    )
+
 class MapRefinementPipeline:
     """地图精细化处理管道"""
     
-    def __init__(self, config_path: str = None):
+    def __init__(self, config_path: str = None, config_dict: Optional[Dict] = None):
         """
         初始化处理管道
         
         Args:
             config_path: 配置文件路径
         """
-        # 加载配置
-        if config_path and os.path.exists(config_path):
-            self.config = PointCloudIO.load_config(config_path)
+        self._config_source_path = None
+
+        if config_dict is not None:
+            self.config = copy.deepcopy(config_dict)
         else:
-            # 使用默认配置
-            default_config_path = os.path.join(
-                os.path.dirname(__file__), 
-                'map_refinement/config/refinement_config.yaml'
-            )
-            if os.path.exists(default_config_path):
-                self.config = PointCloudIO.load_config(default_config_path)
+            if config_path and os.path.exists(config_path):
+                self.config = _load_config_cached(config_path)
+                self._config_source_path = os.path.abspath(config_path)
             else:
-                self.config = self._get_default_config()
+                default_config_path = os.path.join(
+                    os.path.dirname(__file__),
+                    'map_refinement/config/refinement_config.yaml'
+                )
+                if os.path.exists(default_config_path):
+                    self.config = _load_config_cached(default_config_path)
+                    self._config_source_path = os.path.abspath(default_config_path)
+                else:
+                    self.config = self._get_default_config()
         
         # 初始化进度管理器
         performance_config = self.config.get('performance', {})
@@ -90,6 +129,13 @@ class MapRefinementPipeline:
 
         self.progress_manager = initialize_progress_manager(progress_display, use_tqdm)
         logger.info(f"进度管理器初始化完成 - 显示: {progress_display}, tqdm: {use_tqdm}")
+
+        intermediate_workers = max(0, performance_config.get('intermediate_io_workers', 1))
+        self._intermediate_executor = None
+        self._pending_io = []
+        if intermediate_workers > 0:
+            self._intermediate_executor = ThreadPoolExecutor(max_workers=intermediate_workers)
+            logger.debug(f"中间结果写入采用异步线程池，线程数: {intermediate_workers}")
 
         # 初始化算法模块
         self._initialize_modules()
@@ -178,7 +224,13 @@ class MapRefinementPipeline:
                 'target_density': 100,
                 'adaptive_sampling': True,
                 'hole_filling': True,
-                'interpolation_method': 'linear'
+                'interpolation_method': 'linear',
+                'mode': 'kd_tree',
+                'voxel_density_downsample': 2.0,
+                'voxel_neighbor_levels': 0,
+                'hybrid_knn': 64,
+                'hybrid_radius_scale': 1.0,
+                'use_gpu': False
             },
             'performance': {
                 'num_threads': 4,
@@ -209,6 +261,28 @@ class MapRefinementPipeline:
         except Exception as e:
             logger.error(f"算法模块初始化失败: {str(e)}")
             raise
+    
+    def _wait_for_intermediate_tasks(self):
+        if not self._pending_io:
+            return
+        for future in self._pending_io:
+            try:
+                future.result()
+            except Exception as exc:
+                logger.warning(f"异步保存中间结果失败: {exc}")
+        self._pending_io.clear()
+
+    def _shutdown_intermediate_executor(self):
+        self._wait_for_intermediate_tasks()
+        if self._intermediate_executor:
+            self._intermediate_executor.shutdown(wait=True)
+            self._intermediate_executor = None
+
+    def __del__(self):
+        try:
+            self._shutdown_intermediate_executor()
+        except Exception:
+            pass
             
     def process_single_cloud(self, input_path: str, output_path: str,
                            pipeline: str = "full", save_intermediate: bool = False,
@@ -236,28 +310,68 @@ class MapRefinementPipeline:
         except Exception as e:
             logger.error(f"加载点云失败: {str(e)}")
             return {'success': False, 'error': str(e)}
+
+        original_points = original_info.get('num_points', 0)
         
         # 创建输出目录
         output_dir = os.path.dirname(output_path)
         if output_dir and not os.path.exists(output_dir):
             os.makedirs(output_dir, exist_ok=True)
 
+        if original_points == 0:
+            # 空点云没有处理意义，直接跳过
+            logger.warning(f"输入点云为空，跳过处理: {input_path}")
+            if dry_run:
+                return {
+                    'success': True,
+                    'dry_run': True,
+                    'skipped': True,
+                    'reason': 'empty_point_cloud',
+                    'output_file': output_path,
+                    'processing_time': 0.0,
+                    'original_points': 0,
+                    'final_points': 0,
+                    'pipeline': pipeline,
+                    'processing_results': {}
+                }
+
+            if overwrite or not os.path.exists(output_path):
+                PointCloudIO.save_point_cloud(pcd, output_path)
+
+            self._wait_for_intermediate_tasks()
+            return {
+                'success': True,
+                'skipped': True,
+                'reason': 'empty_point_cloud',
+                'output_file': output_path,
+                'processing_time': 0.0,
+                'original_points': 0,
+                'final_points': 0,
+                'pipeline': pipeline,
+                'processing_results': {}
+            }
+
         # 已存在输出且未要求覆盖
         if os.path.exists(output_path) and not overwrite:
             logger.info(f"输出已存在且未指定 --overwrite，跳过: {output_path}")
+            self._wait_for_intermediate_tasks()
             return {'success': True, 'skipped': True, 'output_file': output_path,
                     'processing_time': 0.0, 'original_points': original_info['num_points'],
                     'final_points': None, 'pipeline': pipeline, 'processing_results': {}}
 
         if dry_run:
             logger.info("dry-run 模式：仅检查输入输出与配置，不执行计算")
+            self._wait_for_intermediate_tasks()
             return {'success': True, 'dry_run': True, 'output_file': output_path,
                     'processing_time': 0.0, 'original_points': original_info['num_points'],
                     'final_points': None, 'pipeline': pipeline, 'processing_results': {}}
             
         # 根据管道类型选择处理步骤
         processing_results = {}
-        current_pcd = copy.deepcopy(pcd)
+        if hasattr(pcd, "clone"):
+            current_pcd = pcd.clone()
+        else:
+            current_pcd = copy.deepcopy(pcd)
 
         # 获取自定义管道配置
         pipeline_config = self.config.get('processing_pipeline', {})
@@ -295,7 +409,7 @@ class MapRefinementPipeline:
                         current_pcd = denoised_pcd
                         processing_results['denoising'] = {
                             'stages': len(denoise_results),
-                            'points_removed': original_info['num_points'] - len(current_pcd.points)
+                            'points_removed': max(original_points - len(current_pcd.points), 0)
                         }
 
                         if save_intermediate:
@@ -429,30 +543,45 @@ class MapRefinementPipeline:
             processing_time = time.time() - start_time
             final_info = PointCloudIO.get_point_cloud_info(current_pcd)
             
+            final_points = final_info.get('num_points', 0)
+            point_change_ratio = None
+            if original_points > 0:
+                point_change_ratio = (final_points - original_points) / original_points
+
             result = {
                 'success': True,
                 'processing_time': processing_time,
-                'original_points': original_info['num_points'],
-                'final_points': final_info['num_points'],
-                'point_change_ratio': (final_info['num_points'] - original_info['num_points']) / original_info['num_points'],
+                'original_points': original_points,
+                'final_points': final_points,
+                'point_change_ratio': point_change_ratio,
                 'pipeline': pipeline,
                 'processing_results': processing_results
             }
             
-            logger.info(f"处理完成: {original_info['num_points']} -> {final_info['num_points']} 点, "
+            logger.info(f"处理完成: {original_points} -> {final_points} 点, "
                        f"耗时 {processing_time:.1f}s")
             
+            self._wait_for_intermediate_tasks()
             return result
             
         except Exception as e:
             logger.error(f"处理过程中发生错误: {str(e)}")
+            self._wait_for_intermediate_tasks()
             return {'success': False, 'error': str(e)}
             
     def _save_intermediate(self, pcd: o3d.geometry.PointCloud, base_output_path: str, suffix: str):
         """保存中间结果"""
         base_name = os.path.splitext(base_output_path)[0]
         intermediate_path = f"{base_name}_{suffix}.pcd"
-        PointCloudIO.save_point_cloud(pcd, intermediate_path)
+        if self._intermediate_executor:
+            if hasattr(pcd, "clone"):
+                snapshot = pcd.clone()
+            else:
+                snapshot = copy.deepcopy(pcd)
+            future = self._intermediate_executor.submit(PointCloudIO.save_point_cloud, snapshot, intermediate_path)
+            self._pending_io.append(future)
+        else:
+            PointCloudIO.save_point_cloud(pcd, intermediate_path)
         logger.debug(f"保存中间结果: {intermediate_path}")
         
     def batch_process(self, input_pattern: str, output_dir: str,
@@ -487,25 +616,63 @@ class MapRefinementPipeline:
         # 批量处理
         results = []
         start_time = time.time()
+
+        batch_workers = max(1, int(self.config.get('performance', {}).get('batch_workers', 1)))
+        batch_workers = min(batch_workers, len(input_files))
+        logger.info(f"批处理线程/进程数: {batch_workers}")
+
+        if batch_workers > 1 and not dry_run:
+            config_snapshot = copy.deepcopy(self.config)
+            tasks = []
+            for input_file in input_files:
+                base_name = os.path.basename(input_file)
+                name_without_ext = os.path.splitext(base_name)[0]
+                output_file = os.path.join(output_dir, f"{name_without_ext}_refined.pcd")
+                tasks.append(
+                    (
+                        config_snapshot,
+                        input_file,
+                        output_file,
+                        pipeline,
+                        overwrite,
+                        dry_run,
+                        False,
+                    )
+                )
+            with ProcessPoolExecutor(max_workers=batch_workers) as executor:
+                future_to_io = {executor.submit(_batch_process_worker, task): task for task in tasks}
+                for future in as_completed(future_to_io):
+                    task = future_to_io[future]
+                    input_file = task[1]
+                    output_file = task[2]
+                    try:
+                        result = future.result()
+                    except Exception as exc:
+                        logger.error(f"文件 {input_file} 处理失败: {exc}")
+                        result = {'success': False, 'error': str(exc)}
+                    result['input_file'] = input_file
+                    result['output_file'] = output_file
+                    results.append(result)
+        else:
+            for i, input_file in enumerate(input_files):
+                logger.info(f"处理文件 {i+1}/{len(input_files)}: {input_file}")
+                
+                # 生成输出文件路径
+                base_name = os.path.basename(input_file)
+                name_without_ext = os.path.splitext(base_name)[0]
+                output_file = os.path.join(output_dir, f"{name_without_ext}_refined.pcd")
+                
+                # 处理单个文件
+                result = self.process_single_cloud(input_file, output_file, pipeline,
+                                                   overwrite=overwrite, dry_run=dry_run)
+                result['input_file'] = input_file
+                result['output_file'] = output_file
+                results.append(result)
         
-        for i, input_file in enumerate(input_files):
-            logger.info(f"处理文件 {i+1}/{len(input_files)}: {input_file}")
-            
-            # 生成输出文件路径
-            base_name = os.path.basename(input_file)
-            name_without_ext = os.path.splitext(base_name)[0]
-            output_file = os.path.join(output_dir, f"{name_without_ext}_refined.pcd")
-            
-            # 处理单个文件
-            result = self.process_single_cloud(input_file, output_file, pipeline,
-                                               overwrite=overwrite, dry_run=dry_run)
-            result['input_file'] = input_file
-            result['output_file'] = output_file
-            results.append(result)
-            
         total_time = time.time() - start_time
         
         # 计算统计信息
+        results.sort(key=lambda r: r.get('input_file', ''))
         successful_count = sum(1 for r in results if r.get('success', False))
         total_original_points = sum(r.get('original_points', 0) for r in results if r.get('success', False))
         total_final_points = sum(r.get('final_points', 0) for r in results if r.get('success', False))
@@ -556,7 +723,8 @@ class MapRefinementPipeline:
                     'original_points': len(original_pcd.points),
                     'refined_points': len(refined_pcd.points),
                     'point_change': len(refined_pcd.points) - len(original_pcd.points),
-                    'point_change_ratio': (len(refined_pcd.points) - len(original_pcd.points)) / len(original_pcd.points)
+                    'point_change_ratio': ((len(refined_pcd.points) - len(original_pcd.points)) / len(original_pcd.points)
+                                           if len(original_pcd.points) > 0 else None)
                 },
                 'quality_metrics': quality_metrics,
                 'processing_details': result.get('processing_results', {})
@@ -584,34 +752,60 @@ class MapRefinementPipeline:
             # 密度分析
             original_density = self.density_uniformizer.compute_density_map(original_pcd)
             refined_density = self.density_uniformizer.compute_density_map(refined_pcd)
-            
-            metrics['density'] = {
-                'original_mean': float(np.mean(original_density)),
-                'original_std': float(np.std(original_density)),
-                'refined_mean': float(np.mean(refined_density)),
-                'refined_std': float(np.std(refined_density)),
-                'uniformity_improvement': float(np.std(original_density) - np.std(refined_density))
-            }
+
+            if len(original_density) == 0 or len(refined_density) == 0:
+                metrics['density'] = {'skipped': 'insufficient_points'}
+            else:
+                original_std = float(np.std(original_density))
+                refined_std = float(np.std(refined_density))
+                metrics['density'] = {
+                    'original_mean': float(np.mean(original_density)),
+                    'original_std': original_std,
+                    'refined_mean': float(np.mean(refined_density)),
+                    'refined_std': refined_std,
+                    'uniformity_improvement': float(original_std - refined_std)
+                }
             
             # 几何质量
             if original_pcd.has_normals() and refined_pcd.has_normals():
                 original_normals = np.asarray(original_pcd.normals)
                 refined_normals = np.asarray(refined_pcd.normals)
-                
-                metrics['surface_quality'] = {
-                    'normal_consistency_original': float(np.mean(np.abs(np.sum(original_normals * original_normals, axis=1)))),
-                    'normal_consistency_refined': float(np.mean(np.abs(np.sum(refined_normals * refined_normals, axis=1))))
-                }
-                
+                n = min(len(original_normals), len(refined_normals))
+
+                if n > 0:
+                    original_normals = original_normals[:n]
+                    refined_normals = refined_normals[:n]
+
+                    def _safe_normalize(normals: np.ndarray) -> np.ndarray:
+                        norms = np.linalg.norm(normals, axis=1, keepdims=True)
+                        norms[norms == 0] = 1.0
+                        return normals / norms
+
+                    original_normals = _safe_normalize(original_normals)
+                    refined_normals = _safe_normalize(refined_normals)
+                    alignment = np.clip(np.sum(original_normals * refined_normals, axis=1), -1.0, 1.0)
+
+                    metrics['surface_quality'] = {
+                        'mean_alignment': float(np.mean(np.abs(alignment))),
+                        'alignment_std': float(np.std(alignment))
+                    }
+            
             # 特征保持度
             feature_importance_original = self.detail_preserver.compute_feature_importance(original_pcd)
             feature_importance_refined = self.detail_preserver.compute_feature_importance(refined_pcd)
             
             if len(feature_importance_original) > 0 and len(feature_importance_refined) > 0:
+                original_strength = float(np.mean(feature_importance_original))
+                refined_strength = float(np.mean(feature_importance_refined))
+
+                preservation_ratio = None
+                if abs(original_strength) > 1e-9:
+                    preservation_ratio = refined_strength / original_strength
+
                 metrics['feature_preservation'] = {
-                    'original_feature_strength': float(np.mean(feature_importance_original)),
-                    'refined_feature_strength': float(np.mean(feature_importance_refined)),
-                    'feature_preservation_ratio': float(np.mean(feature_importance_refined) / np.mean(feature_importance_original))
+                    'original_feature_strength': original_strength,
+                    'refined_feature_strength': refined_strength,
+                    'feature_preservation_ratio': preservation_ratio
                 }
                 
         except Exception as e:

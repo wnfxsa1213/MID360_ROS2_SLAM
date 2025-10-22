@@ -1,14 +1,14 @@
 point_cloud_filter_bridge:
   ros__parameters:
     input_topic: /livox/lidar
-    output_topic: /livox/lidar
+    output_topic: /livox/lidar_filtered
     debug_topic: /point_cloud_filter/debug_cloud
     stats_topic: /point_cloud_filter/filter_stats
     debug_enabled: false
     publish_stats: true
     max_processing_hz: 20.0
     dynamic_filter:
-      enable: true
+      enable: false
       publish_stats: true
       motion_threshold: 0.1
       history_size: 8

@@ -3,6 +3,9 @@ set -euo pipefail
 
 # Dynamic filter runtime verifier
 # Verifies topics, logs, and end-to-end data flow for bag → SLAM → dynamic filter
+#
+# 注意: 此功能已集成到 slam_tools.sh filter status
+# 建议使用: ./slam_tools.sh filter status
 
 ROS_SETUP="/opt/ros/humble/setup.bash"
 WS_SETUP="$(cd "$(dirname "${BASH_SOURCE[0]}")"/.. && pwd)/ws_livox/install/setup.bash"

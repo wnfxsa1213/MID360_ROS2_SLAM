@@ -6,36 +6,20 @@
 
 ### 主要脚本
 
-1. **start_slam.sh** - SLAM系统启动脚本
-   - 自动检查网络配置
-   - 按顺序启动各个组件
-   - 实时状态监控和错误处理
-
-2. **stop_slam.sh** - 系统安全停止脚本
-   - 优雅关闭所有进程
-   - 清理临时文件和PID文件
-
-3. **check_slam.sh** - 系统状态检查工具
-   - 网络连接测试
-   - ROS进程监控
-   - 话题状态检查
-   - 数据流测试
-
-4. **slam_tools.sh** - 综合管理工具集
-   - 一键式系统管理
-   - 多种调试和监控功能
-   - 保存/重建地图与轨迹（LIO/PGO/HBA 集成）
+**slam_tools.sh** - 综合管理工具集（统一入口）
+- 一键式系统管理（启动/停止/重启/状态检查）
+- 多种调试和监控功能
+- 保存/重建地图与轨迹（LIO/PGO/HBA 集成）
+- 配置管理、网络诊断、数据记录与回放
 
 ### 使用方法
 
 ```bash
 # 基本操作
-./start_slam.sh    # 启动系统
-./stop_slam.sh     # 停止系统  
-./check_slam.sh    # 检查状态
-
-# 工具集使用
-./slam_tools.sh help      # 查看帮助
+./slam_tools.sh help      # 查看完整帮助
+./slam_tools.sh start     # 启动系统
+./slam_tools.sh stop      # 停止系统
+./slam_tools.sh status    # 检查状态
 ./slam_tools.sh restart   # 重启系统
 ./slam_tools.sh monitor   # 监控数据流
 ./slam_tools.sh network   # 网络诊断
@@ -72,11 +56,18 @@ chmod +x *.sh
 
 ## 关键 Python 工具
 
-- `save_maps_bundle.py` / `save_map_simple.py`：通过服务接口保存地图与轨迹。
+- `save_maps_bundle.py` / `save_map_lio_only.py`：通过服务接口保存地图与轨迹（bundle 版本保存完整数据，lio_only 版本仅保存 LIO 地图）。
 - `reconstruct_map_from_patches.py`：用 PGO/HBA 结果离线重建全图。
 - `pcd_to_gridmap.py`：增强版 PCD → 栅格地图转换器，配合 `gridmap_gui.py`（PyQt GUI）和 `view_gridmap.py` 浏览结果。
 - `map_refinement.py`：全流程点云精修管线，依赖 `map_refinement/` 子包。
- - `slam_manager_gui.py`：基于 PyQt5 的管理面板原型，可启动/停止系统、编辑 master 配置、查看性能指标、联动 gridmap GUI。
+  - **性能优化**：
+    - `performance.intermediate_io_workers`：异步写入中间结果的线程数（默认 1，设为 0 则改为同步写入），避免 I/O 阻塞主流程。
+    - `performance.batch_workers`：批处理时的并行进程数，>1 时对每个输入文件派生独立进程并行处理。
+  - **密度模式**：`density_uniformization.mode` 支持 `kd_tree`（共享KDTree）、`voxel`（体素近似）、`hybrid`（Open3D Hybrid）、`gpu`（CuPy+cuML），并可通过 `voxel_density_downsample`、`voxel_neighbor_levels`、`hybrid_knn` 等参数细调准确度与性能。
+  - **配置缓存**：YAML 配置文件会根据修改时间自动缓存，避免重复解析。
+  - **内存优化**：点云拷贝优先使用 `clone()` 方法（若支持），大幅降低百万级点云的内存开销。
+  - **索引修复**：修复了 `edge_enhancer.py` 中 set 转列表导致的索引错位问题，提升长流程稳定性。
+- `slam_manager_gui.py`：基于 PyQt5 的管理面板原型，可启动/停止系统、编辑 master 配置、查看性能指标、联动 gridmap GUI。
 - `performance_analyzer.py` / `comprehensive_performance_report.py`：分别用于实时性能采集与动态滤波器离线评估。
 - `record_data.py` / `replay_validation.py` 等测试脚本：支持数据采集、回放验证。
 
@@ -88,6 +79,7 @@ chmod +x *.sh
 - `network_performance_tester.py`：带硬编码 IP/网卡参数的网络测试器，如需使用请自行配置。
 - `test_with_bag.sh`：bag 测试脚本现已支持通过 `BAG_PATH`、`RVIZ_CONFIG` 环境变量指定资源，否则读取 `data/rosbags/`。
 - `pcd_to_gridmap_backup.py`：早期的 PCD→栅格转换脚本已移除，统一使用增强版 `pcd_to_gridmap.py`。
+- **已迁移 (2025-10-20)**：`start_slam.sh`, `stop_slam.sh`, `check_slam.sh` - 这些独立启动脚本的功能已完全集成到 `slam_tools.sh`，请使用 `./slam_tools.sh start|stop|status` 替代。
 
 这些脚本默认不会被主流程调用，使用前请确认参数并根据实际环境调整。
 

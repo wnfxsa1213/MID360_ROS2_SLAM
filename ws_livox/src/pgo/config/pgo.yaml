@@ -1,22 +1,33 @@
 # PGO配置文件
 # 由配置生成器自动生成，请勿手动修改
-# 生成时间: 2025-10-18 20:29:44
+# 生成时间: 2025-10-22 19:27:08
 # 主配置文件: /home/tianyu/codes/Mid360map/config/master_config.yaml
 
-cloud_topic: /localizer/filtered_cloud
+cloud_topic: /slam/body_cloud
+icp_euclidean_fitness_epsilon: 1.0e-06
+icp_max_distance: 2.0
+icp_max_iterations: 50
+icp_transformation_epsilon: 1.0e-06
+inlier_threshold: 0.3
+isam_relinearize_skip: 1
+isam_relinearize_threshold: 0.01
 key_pose_delta_deg: 10
 key_pose_delta_trans: 0.3
 local_frame: lidar
+log_level: INFO
+loop_retry_capacity: 32
+loop_retry_inlier_relax: 0.7
+loop_retry_interval: 5.0
+loop_retry_max_attempts: 3
+loop_retry_score_relax: 1.5
 loop_score_tresh: 0.3
 loop_search_radius: 5.0
 loop_submap_half_range: 5
 loop_time_tresh: 10.0
 map_frame: map
+max_candidates: 5
+min_index_separation: 10
+min_inlier_ratio: 0.3
 min_loop_detect_duration: 2.0
 odom_topic: /slam/lio_odom
 submap_resolution: 0.1
-icp_max_iterations: 50
-icp_transformation_epsilon: 1.0e-6
-icp_euclidean_fitness_epsilon: 1.0e-6
-isam_relinearize_threshold: 0.01
-isam_relinearize_skip: 1

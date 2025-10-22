@@ -188,14 +188,14 @@ start_cooperative_slam_system() {
     echo $SLAM_SYSTEM_PID > /tmp/slam_coop.pid
     
     info "等待系统启动..."
-    sleep 8
+    sleep 10
     
     # 检查核心组件启动状态
     local success=0
     local total=0
     
-    # 检查各个节点
-    components=("lio_node:FastLIO2" "pgo_node:PGO" "hba_node:HBA" "localizer_node:Localizer" "optimization_coordinator:协调器" "rviz2:可视化")
+    # 检查各个节点（节点名称需与 launch 文件中定义的一致）
+    components=("fastlio2_node:FastLIO2" "pgo_node:PGO" "hba_node:HBA" "localizer_node:Localizer" "optimization_coordinator:协调器" "rviz2:可视化")
     
     for component in "${components[@]}"; do
         node_name="${component%%:*}"
@@ -227,6 +227,29 @@ start_cooperative_slam_system() {
     info "  状态检查: $0 status"
     info "  实时监控: $0 monitor"
     info "  保存地图: $0 save"
+
+    # 设置清理函数，捕获 Ctrl+C 信号
+    cleanup_slam_realtime() {
+        echo ""
+        warn "正在停止SLAM系统..."
+        if [ -f /tmp/slam_coop.pid ]; then
+            local PID=$(cat /tmp/slam_coop.pid 2>/dev/null)
+            if [ -n "$PID" ] && kill -0 "$PID" 2>/dev/null; then
+                kill "$PID" 2>/dev/null || true
+                sleep 2
+                kill -9 "$PID" 2>/dev/null || true
+            fi
+            rm -f /tmp/slam_coop.pid
+        fi
+        ok "SLAM系统已停止"
+    }
+    trap cleanup_slam_realtime EXIT INT TERM
+
+    # 保持脚本运行，等待 launch 进程结束或用户中断
+    echo ""
+    info "SLAM系统正在运行中..."
+    info "按 Ctrl+C 停止系统"
+    wait "$SLAM_SYSTEM_PID" 2>/dev/null || true
 }
 
 # 停止所有SLAM组件
@@ -278,7 +301,7 @@ stop_all_slam_components() {
 
     # 4) 等待节点消失（最多3秒）
     for i in 1 2 3; do
-        if ! ros2 node list 2>/dev/null | grep -E "(livox|lio_node|pgo_node|hba_node|localizer_node|optimization_coordinator|point_cloud_filter_bridge|robot_state_publisher|static_transform)" >/dev/null; then
+        if ! ros2 node list 2>/dev/null | grep -E "(livox|fastlio2_node|pgo_node|hba_node|localizer_node|optimization_coordinator|point_cloud_filter_bridge|robot_state_publisher|static_transform)" >/dev/null; then
             break
         fi
         sleep 1

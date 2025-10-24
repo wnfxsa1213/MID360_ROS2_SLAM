@@ -670,6 +670,11 @@ class ConfigGenerator:
             def get(key, default):
                 return coop.get(key, default)
 
+            raw_hba_path = get('hba_maps_path', str(self.project_root / "saved_maps" / "hba_workspace"))
+            hba_path = Path(raw_hba_path)
+            if not hba_path.is_absolute():
+                hba_path = (self.project_root / hba_path).resolve()
+
             params = {
                 'coordinator': {
                     'ros__parameters': {
@@ -679,7 +684,7 @@ class ConfigGenerator:
                         'auto_optimization': bool(get('auto_optimization', True)),
                         'service_timeout_ms': int(get('service_timeout_ms', 3000)),
                         'emergency_failure_threshold': int(get('emergency_failure_threshold', 3)),
-                        'hba_maps_path': get('hba_maps_path', '/tmp/current_map.pcd'),
+                        'hba_maps_path': str(hba_path),
                         'enable_relocalization': bool(get('enable_relocalization', True)),
                         'min_pose_delta': float(get('min_pose_delta', 0.03)),
                         'min_orientation_delta_deg': float(get('min_orientation_delta_deg', 0.5)),

@@ -1,12 +1,12 @@
 # Localizer配置文件
 # 由配置生成器自动生成，请勿手动修改
-# 生成时间: 2025-10-22 19:27:08
+# 生成时间: 2025-10-24 10:58:15
 # 主配置文件: /home/tianyu/codes/Mid360map/config/master_config.yaml
 
 cloud_topic: /slam/body_cloud
 dynamic_filter:
   density_ratio_thresh: 0.5
-  downsample_ratio: 1
+  downsample_ratio: 2
   enable: false
   history_size: 8
   max_points_per_frame: 60000
@@ -18,13 +18,13 @@ dynamic_filter:
   publish_stats: true
   search_radius: 0.2
   stability_threshold: 0.75
-  voxel_size_base: 0.01
+  voxel_size_base: 0.03
 local_frame: lidar
 map_frame: map
 odom_topic: /slam/lio_odom
-refine_map_resolution: 0.1
+refine_map_resolution: 0.2
 refine_max_iteration: 10
-refine_scan_resolution: 0.1
+refine_scan_resolution: 0.2
 refine_score_thresh: 0.1
 rough_map_resolution: 0.25
 rough_max_iteration: 5

@@ -18,6 +18,6 @@ point_cloud_filter_bridge:
       min_neighbors: 10
       normal_consistency_thresh: 0.8
       density_ratio_thresh: 0.5
-      downsample_ratio: 1
+      downsample_ratio: 2
       max_points_per_frame: 60000
-      voxel_size_base: 0.01
+      voxel_size_base: 0.03

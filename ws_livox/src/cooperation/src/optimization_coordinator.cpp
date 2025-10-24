@@ -12,10 +12,12 @@
 #include "interface/srv/trigger_optimization.hpp"
 #include "interface/srv/get_optimized_pose.hpp"
 #include "interface/srv/refine_map.hpp"
+#include "interface/srv/save_maps.hpp"
 #include "interface/srv/relocalize.hpp"
 #include "interface/srv/is_valid.hpp"
 #include <algorithm>
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <queue>
 #include <mutex>
@@ -25,6 +27,7 @@
 #include <deque>
 #include <numeric>
 #include <fstream>
+#include <filesystem>
 #include <sys/resource.h>
 #include <unistd.h>
 #include <Eigen/Geometry>
@@ -70,6 +73,12 @@ public:
         RCLCPP_INFO(this->get_logger(), "🚀 优化协调器启动 - 真正协同SLAM系统");
 
         loadConfiguration();
+        {
+            std::lock_guard<std::mutex> lock(m_trigger_mutex);
+            auto initialized_time = this->get_clock()->now();
+            m_last_regular_trigger_time = initialized_time -
+                rclcpp::Duration::from_seconds(m_config.regular_optimization_min_interval);
+        }
         initializeClients();
         initializeServices();
         initializeSubscriptions();
@@ -109,11 +118,14 @@ private:
         double relocalization_min_yaw = 5.0; // degrees
         int service_timeout_ms = 3000;
         int emergency_failure_threshold = 3;
-        std::string hba_maps_path = "/tmp/current_map.pcd";
+        std::string hba_maps_path = "saved_maps/hba_workspace";
+        std::size_t min_keyframes_for_hba = 5;
+        double regular_optimization_min_interval = 30.0;
     } m_config;
 
     // 客户端和服务
     rclcpp::Client<interface::srv::RefineMap>::SharedPtr m_hba_client;
+    rclcpp::Client<interface::srv::SaveMaps>::SharedPtr m_pgo_save_client;
     rclcpp::Client<interface::srv::Relocalize>::SharedPtr m_localizer_client;
     rclcpp::Client<interface::srv::IsValid>::SharedPtr m_reloc_check_client;
     rclcpp::Client<interface::srv::UpdatePose>::SharedPtr m_fastlio_client;
@@ -143,7 +155,9 @@ private:
     mutable std::mutex m_queue_mutex;
     mutable std::mutex m_metrics_mutex;
     mutable std::mutex m_pose_mutex;
+    mutable std::mutex m_trigger_mutex;
     std::atomic<bool> m_pending_emergency{false};
+    rclcpp::Time m_last_regular_trigger_time;
 
     geometry_msgs::msg::Pose m_last_pose;
     geometry_msgs::msg::Pose m_reference_pose;
@@ -170,6 +184,8 @@ private:
         this->declare_parameter("service_timeout_ms", m_config.service_timeout_ms);
         this->declare_parameter("emergency_failure_threshold", m_config.emergency_failure_threshold);
         this->declare_parameter("hba_maps_path", m_config.hba_maps_path);
+        this->declare_parameter("min_keyframes_for_hba", static_cast<int>(m_config.min_keyframes_for_hba));
+        this->declare_parameter("regular_optimization_min_interval", m_config.regular_optimization_min_interval);
 
         m_config.drift_threshold = this->get_parameter("drift_threshold").as_double();
         m_config.time_threshold = this->get_parameter("time_threshold").as_double();
@@ -189,8 +205,12 @@ private:
         int failure_threshold = static_cast<int>(this->get_parameter("emergency_failure_threshold").as_int());
         m_config.emergency_failure_threshold = std::max(1, failure_threshold);
         m_config.hba_maps_path = this->get_parameter("hba_maps_path").as_string();
+        int hba_min_keyframes = this->get_parameter("min_keyframes_for_hba").as_int();
+        m_config.min_keyframes_for_hba = static_cast<std::size_t>(std::max(1, hba_min_keyframes));
+        m_config.regular_optimization_min_interval =
+            std::max(0.0, this->get_parameter("regular_optimization_min_interval").as_double());
         if (m_config.hba_maps_path.empty()) {
-            m_config.hba_maps_path = "/tmp/current_map.pcd";
+            m_config.hba_maps_path = "saved_maps/hba_workspace";
         }
 
         RCLCPP_INFO(this->get_logger(), "配置加载: 漂移阈值=%.2fm, 时间阈值=%.1fs",
@@ -200,6 +220,7 @@ private:
     void initializeClients()
     {
         m_hba_client = this->create_client<interface::srv::RefineMap>("hba/refine_map");
+        m_pgo_save_client = this->create_client<interface::srv::SaveMaps>("pgo/save_maps");
         m_localizer_client = this->create_client<interface::srv::Relocalize>("localizer/relocalize");
         m_reloc_check_client = this->create_client<interface::srv::IsValid>("localizer/relocalize_check");
         m_fastlio_client = this->create_client<interface::srv::UpdatePose>("fastlio2/update_pose");
@@ -294,7 +315,20 @@ private:
         bool time_exceeded = (now - snapshot.last_optimization_time).seconds() > m_config.time_threshold;
         bool not_busy = !snapshot.optimization_in_progress;
 
-        return (drift_exceeded || time_exceeded) && not_busy;
+        double seconds_since_last_trigger = 0.0;
+        {
+            std::lock_guard<std::mutex> lock(m_trigger_mutex);
+            seconds_since_last_trigger = (now - m_last_regular_trigger_time).seconds();
+        }
+        bool interval_met = seconds_since_last_trigger >= m_config.regular_optimization_min_interval;
+
+        if (!not_busy) {
+            return false;
+        }
+        if (time_exceeded) {
+            return true;
+        }
+        return drift_exceeded && interval_met;
     }
 
     void scheduleEmergencyOptimization()
@@ -327,6 +361,11 @@ private:
             hba_task.created_time = this->get_clock()->now();
             hba_task.component_name = "hba_refinement";
             addTaskToQueue(hba_task);
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(m_trigger_mutex);
+            m_last_regular_trigger_time = this->get_clock()->now();
         }
     }
 
@@ -419,9 +458,9 @@ private:
                 if (resp && resp->success) {
                     double rotation_deg = 0.0;
                     double translation = calculatePoseDelta(pre_pose, resp->optimized_pose.pose, rotation_deg);
-                    if (resp->optimization_score < m_config.optimization_score_threshold &&
-                        translation < m_config.min_pose_delta &&
-                        rotation_deg < m_config.min_orientation_delta_deg) {
+                    if (resp->optimization_score <= m_config.optimization_score_threshold ||
+                        (translation <= m_config.min_pose_delta &&
+                         rotation_deg <= m_config.min_orientation_delta_deg)) {
                         RCLCPP_WARN(this->get_logger(),
                                     "PGO optimization rejected: delta %.4fm, rotation %.3fdeg, score %.3f",
                                     translation, rotation_deg, resp->optimization_score);
@@ -456,6 +495,85 @@ private:
     {
         RCLCPP_INFO(this->get_logger(), "🔧 执行HBA精细化...");
 
+        const std::string maps_dir = ensureHbaWorkspace();
+        if (maps_dir.empty()) {
+            finalizeOptimization(false);
+            return;
+        }
+
+        auto timeout = serviceWaitTimeout();
+        if (!m_pgo_save_client) {
+            RCLCPP_ERROR(this->get_logger(), "PGO保存服务未初始化");
+            finalizeOptimization(false);
+            return;
+        }
+        if (!m_pgo_save_client->wait_for_service(timeout)) {
+            RCLCPP_ERROR(this->get_logger(), "PGO保存服务不可用");
+            finalizeOptimization(false);
+            return;
+        }
+
+        auto request = std::make_shared<interface::srv::SaveMaps::Request>();
+        request->file_path = maps_dir;
+        request->save_patches = true;
+
+        auto callback = [this, maps_dir](rclcpp::Client<interface::srv::SaveMaps>::SharedFuture future) {
+            try {
+                auto resp = future.get();
+                if (!resp->success) {
+                    RCLCPP_ERROR(this->get_logger(),
+                                 "❌ 保存PGO关键帧失败: %s", resp->message.c_str());
+                    finalizeOptimization(false);
+                    return;
+                }
+                std::size_t pose_count = 0;
+                if (!hasSufficientHbaKeyframes(maps_dir, pose_count)) {
+                    RCLCPP_WARN(this->get_logger(),
+                                "HBA跳过：关键帧不足 (%zu < %zu)",
+                                pose_count, m_config.min_keyframes_for_hba);
+                    finalizeOptimization(false);
+                    return;
+                }
+                dispatchHBARefinement(maps_dir);
+            } catch (const std::exception& e) {
+                RCLCPP_ERROR(this->get_logger(), "PGO保存服务调用异常: %s", e.what());
+                finalizeOptimization(false);
+            }
+        };
+
+        m_pgo_save_client->async_send_request(request, callback);
+    }
+
+    bool hasSufficientHbaKeyframes(const std::string& maps_path, std::size_t& pose_count) const
+    {
+        pose_count = 0;
+        std::filesystem::path poses_file = std::filesystem::path(maps_path) / "poses.txt";
+        if (!std::filesystem::exists(poses_file)) {
+            RCLCPP_WARN(this->get_logger(), "poses.txt not found in %s", maps_path.c_str());
+            return false;
+        }
+
+        std::ifstream ifs(poses_file);
+        if (!ifs.is_open()) {
+            RCLCPP_WARN(this->get_logger(), "failed to open %s", poses_file.c_str());
+            return false;
+        }
+
+        std::string line;
+        while (std::getline(ifs, line)) {
+            if (line.empty()) {
+                continue;
+            }
+            ++pose_count;
+            if (pose_count >= m_config.min_keyframes_for_hba) {
+                return true;
+            }
+        }
+        return pose_count >= m_config.min_keyframes_for_hba;
+    }
+
+    void dispatchHBARefinement(const std::string& maps_path)
+    {
         auto timeout = serviceWaitTimeout();
         if (!m_hba_client->wait_for_service(timeout)) {
             RCLCPP_ERROR(this->get_logger(), "HBA服务不可用");
@@ -464,7 +582,7 @@ private:
         }
 
         auto request = std::make_shared<interface::srv::RefineMap::Request>();
-        request->maps_path = m_config.hba_maps_path;
+        request->maps_path = maps_path;
 
         auto callback = [this](rclcpp::Client<interface::srv::RefineMap>::SharedFuture result) {
             try {
@@ -656,6 +774,8 @@ private:
             m_metrics.last_optimization_time = now;
             if (success) {
                 m_metrics.successful_optimizations++;
+                m_recent_drift_changes.clear();
+                m_metrics.cumulative_drift = 0.0;
             } else {
                 m_metrics.failed_optimizations++;
             }
@@ -672,6 +792,36 @@ private:
     std::chrono::milliseconds serviceWaitTimeout() const
     {
         return std::chrono::milliseconds(std::max(0, m_config.service_timeout_ms));
+    }
+
+    std::string ensureHbaWorkspace()
+    {
+        namespace fs = std::filesystem;
+        fs::path configured(m_config.hba_maps_path);
+        if (configured.empty()) {
+            configured = "saved_maps/hba_workspace";
+        }
+        if (configured.has_extension() && configured.extension() == ".pcd") {
+            configured = configured.parent_path();
+        }
+        if (configured.empty()) {
+            configured = "saved_maps/hba_workspace";
+        }
+
+        fs::path resolved = configured.is_absolute() ? configured : fs::absolute(configured);
+        std::error_code ec;
+        fs::create_directories(resolved, ec);
+        if (ec) {
+            RCLCPP_ERROR(this->get_logger(),
+                         "无法创建HBA工作目录: %s (%s)",
+                         resolved.string().c_str(),
+                         ec.message().c_str());
+            return {};
+        }
+
+        m_config.hba_maps_path = resolved.string();
+        RCLCPP_INFO(this->get_logger(), "HBA地图目录: %s", m_config.hba_maps_path.c_str());
+        return m_config.hba_maps_path;
     }
 
     // 回调函数
@@ -697,22 +847,28 @@ private:
         const double lidar_buffer = msg->data.size() > 3 ? msg->data[3] : 0.0;
 
         double penalty = 0.0;
-        if (processing_time_ms > 40.0) {
-            penalty += (processing_time_ms - 40.0) * 0.002; // 时间越久越容易漂移
+        if (processing_time_ms > 45.0) {
+            penalty += (processing_time_ms - 45.0) * 0.001; // 处理时间过长
         }
-        if (point_count > 0.0 && point_count < 12000.0) {
-            penalty += 0.02; // 点云过稀
+        if (point_count > 0.0) {
+            if (point_count < 10000.0) {
+                penalty += 0.01; // 点云稀疏
+            } else if (point_count > 45000.0) {
+                penalty += 0.005; // 点云过密会拖慢滤波
+            }
         }
-        if (imu_buffer > 5.0) {
-            penalty += (imu_buffer - 5.0) * 0.002;
+        if (imu_buffer > 8.0) {
+            penalty += (imu_buffer - 8.0) * 0.001;
         }
-        if (lidar_buffer > 3.0) {
-            penalty += (lidar_buffer - 3.0) * 0.003;
+        if (lidar_buffer > 4.0) {
+            penalty += (lidar_buffer - 4.0) * 0.002;
         }
 
-        double drift_increment = penalty;
+        double drift_increment = std::clamp(penalty * 0.5,
+                                            0.0,
+                                            std::max(0.05, m_config.drift_threshold * 0.2));
         if (m_recent_drift_changes.empty()) {
-            drift_increment += m_config.drift_threshold * 0.02;
+            drift_increment += m_config.drift_threshold * 0.015;
         }
 
         {

@@ -1,16 +1,16 @@
 coordinator:
   ros__parameters:
-    drift_threshold: 0.5
-    time_threshold: 60.0
-    emergency_threshold: 2.0
+    drift_threshold: 0.4
+    time_threshold: 90.0
+    emergency_threshold: 1.5
     auto_optimization: true
     service_timeout_ms: 3000
     emergency_failure_threshold: 3
-    hba_maps_path: /tmp/current_map.pcd
+    hba_maps_path: /home/tianyu/codes/Mid360map/saved_maps/hba_workspace
     enable_relocalization: true
-    min_pose_delta: 0.03
+    min_pose_delta: 0.02
     min_orientation_delta_deg: 0.5
-    optimization_score_threshold: 0.6
+    optimization_score_threshold: 0.3
     drift_history_size: 20
     relocalization_score_threshold: 0.15
     relocalization_timeout_sec: 10.0

@@ -561,7 +561,7 @@ void SimplePGO::resetKeyPoseKdTree()
     }
     m_key_pose_cloud->clear();
     m_kdtree_index_map.clear();
-    m_key_pose_kdtree.setInputCloud(m_key_pose_cloud);
+    m_key_pose_kdtree = pcl::KdTreeFLANN<pcl::PointXYZ>();
     m_kdtree_populated_count = 0;
     m_new_key_poses_since_rebuild = 0;
     m_kdtree_dirty = false;

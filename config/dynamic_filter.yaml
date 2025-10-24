@@ -8,7 +8,7 @@ bridge:
   max_processing_hz: 18.0
 
 dynamic_filter:
-  enable: true
+  enable: false
   publish_stats: true
   motion_threshold: 0.08
   history_size: 8

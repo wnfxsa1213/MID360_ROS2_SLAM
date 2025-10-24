@@ -8,6 +8,7 @@
 #include <pcl/io/pcd_io.h>
 #include <chrono>
 #include <vector>
+#include <cstddef>
 #include <algorithm>
 #include <cmath>
 #include <Eigen/Geometry>
@@ -89,6 +90,10 @@ public:
         m_hba_config.ba_max_iter = config["ba_max_iter"].as<size_t>();
         m_hba_config.hba_iter = config["hba_iter"].as<size_t>();
         m_hba_config.down_sample = config["down_sample"].as<double>();
+        if (config["min_pose_count"])
+        {
+            m_min_pose_count = std::max<std::size_t>(1, config["min_pose_count"].as<std::size_t>());
+        }
     }
 
     void refineMapCB(const std::shared_ptr<interface::srv::RefineMap::Request> request,
@@ -151,13 +156,26 @@ public:
                 m_hba->insert(cloud, pose);
             }
 
-            if (m_hba->poses().empty()) {
+            const std::size_t pose_count = m_hba->poses().size();
+
+            if (pose_count == 0) {
                 response->success = false;
                 response->message = format(Code::DATA_MISMATCH, "poses.txt loaded no valid entries");
                 return;
             }
 
-            RCLCPP_INFO(this->get_logger(), "LOAD POSE %lu;", m_hba->poses().size());
+            RCLCPP_INFO(this->get_logger(), "LOAD POSE %lu;", pose_count);
+
+            if (pose_count < m_min_pose_count) {
+                response->success = false;
+                response->message = format(Code::DATA_MISMATCH,
+                                           "HBA requires at least " + std::to_string(m_min_pose_count) +
+                                               " poses, but only " + std::to_string(pose_count) + " loaded");
+                RCLCPP_WARN(this->get_logger(),
+                            "HBA skipped: insufficient pose count (%lu < %lu)",
+                            pose_count, m_min_pose_count);
+                return;
+            }
 
             Vec<Pose> initial_poses = m_hba->poses();
             int iterations_used = 0;
@@ -483,6 +501,7 @@ private:
     pcl::VoxelGrid<pcl::PointXYZI> m_voxel_grid;
     std::mutex m_service_mutex;
     std::unordered_set<int32_t> m_loaded_keyframes;
+    std::size_t m_min_pose_count{5};
 };
 
 int main(int argc, char **argv)

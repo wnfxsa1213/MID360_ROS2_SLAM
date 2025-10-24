@@ -1,6 +1,6 @@
 # FAST-LIO2配置文件
 # 由配置生成器自动生成，请勿手动修改
-# 生成时间: 2025-10-22 19:27:08
+# 生成时间: 2025-10-24 10:58:15
 # 主配置文件: /home/tianyu/codes/Mid360map/config/master_config.yaml
 
 body_frame: base_link
@@ -10,7 +10,7 @@ det_range: 30
 enable_buffer_monitoring: true
 esti_il: false
 gravity_align: true
-ieskf_max_iter: 6
+ieskf_max_iter: 5
 imu_init_num: 500
 imu_topic: /livox/imu
 lidar_cov_inv: 2000.0
@@ -22,7 +22,7 @@ lidar_topic: /livox/lidar_filtered
 map_resolution: 0.25
 max_imu_buffer_size: 8000
 max_lidar_buffer_size: 1000
-move_thresh: 0.8
+move_thresh: 0.6
 na: 0.005
 nba: 0.0001
 nbg: 5.0e-05

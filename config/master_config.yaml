@@ -82,7 +82,7 @@ fastlio2:
   map_resolution: 0.25
   cube_len: 100
   det_range: 30
-  move_thresh: 0.8
+  move_thresh: 0.6
   imu_noise:
     accelerometer: 0.005
     gyroscope: 0.005
@@ -91,7 +91,7 @@ fastlio2:
   algorithm:
     imu_init_num: 500
     near_search_num: 8
-    ieskf_max_iter: 6
+    ieskf_max_iter: 5
     gravity_align: true
     esti_il: false
   point_cloud:
@@ -147,13 +147,13 @@ pgo:
   log_level: INFO
   key_pose_delta_deg: 10
   key_pose_delta_trans: 0.3
-  loop_search_radius: 5.0
+  loop_search_radius: 6.0
   loop_time_tresh: 10.0
-  loop_score_tresh: 0.3
+  loop_score_tresh: 0.35
   loop_submap_half_range: 5
   submap_resolution: 0.1
   min_loop_detect_duration: 2.0
-  isam_relinearize_threshold: 0.01
+  isam_relinearize_threshold: 0.05
   isam_relinearize_skip: 1
   loop_retry_max_attempts: 3
   loop_retry_interval: 5.0
@@ -171,6 +171,7 @@ hba:
   ba_max_iter: 10
   hba_iter: 5
   down_sample: 0.1
+  min_pose_count: 5
 localizer:
   cloud_topic: /slam/body_cloud
   odom_topic: /slam/lio_odom
@@ -183,8 +184,8 @@ localizer:
     max_iteration: 5
     score_thresh: 0.2
   refine_localization:
-    scan_resolution: 0.1
-    map_resolution: 0.1
+    scan_resolution: 0.2
+    map_resolution: 0.2
     max_iteration: 10
     score_thresh: 0.1
   dynamic_filter:
@@ -199,18 +200,23 @@ localizer:
     min_neighbors: 10
     normal_consistency_thresh: 0.8
     density_ratio_thresh: 0.5
-    downsample_ratio: 1
+    downsample_ratio: 2
     max_points_per_frame: 60000
-    voxel_size_base: 0.01
+    voxel_size_base: 0.03
 cooperation:
   enable: true
-  drift_threshold: 0.5
-  time_threshold: 60.0
-  service_timeout_ms: 3000
-  hba_maps_path: /tmp/current_map.pcd
-  emergency_threshold: 2.0
+  drift_threshold: 0.8
+  time_threshold: 120.0
+  emergency_threshold: 1.5
   emergency_failure_threshold: 3
+  service_timeout_ms: 3000
+  hba_maps_path: saved_maps/hba_workspace
   auto_optimization: true
+  min_pose_delta: 0.05
+  min_orientation_delta_deg: 1.0
+  optimization_score_threshold: 0.4
+  min_keyframes_for_hba: 5
+  regular_optimization_min_interval: 30.0
   multi_agent:
     max_agents: 4
     communication_freq: 5.0

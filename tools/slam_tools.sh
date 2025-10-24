@@ -279,7 +279,7 @@ stop_all_slam_components() {
     patterns=(
         "livox_ros_driver2_node"
         "point_cloud_filter_bridge_node"
-        "lio_node"
+        "fastlio2_node"
         "pgo_node"
         "hba_node"
         "localizer_node"
@@ -317,11 +317,11 @@ check_full_slam_status() {
     
     load_ros_env
     
-    # 检查各个节点状态
+    # 检查各个节点状态（节点名称需与 launch 文件中定义的一致）
     slam_components=(
-        "lio_node:FastLIO2核心"
+        "fastlio2_node:FastLIO2核心"
         "pgo_node:位姿图优化"
-        "hba_node:分层束调整" 
+        "hba_node:分层束调整"
         "localizer_node:定位器"
     )
     
@@ -335,7 +335,7 @@ check_full_slam_status() {
         # 检查是否应该运行（包是否已编译）
         pkg_name=""
         case "$node_name" in
-            "lio_node") pkg_name="fastlio2" ;;
+            "fastlio2_node") pkg_name="fastlio2" ;;
             "pgo_node") pkg_name="pgo" ;;
             "hba_node") pkg_name="hba" ;;
             "localizer_node") pkg_name="localizer" ;;
